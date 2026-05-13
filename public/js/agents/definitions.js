@@ -772,6 +772,10 @@ Output JSON only:
 
 };
 
+// Make definitions available across classic scripts and stricter loaders.
+if (typeof window !== 'undefined') window.AGENT_DEFS = AGENT_DEFS;
+if (typeof globalThis !== 'undefined') globalThis.AGENT_DEFS = AGENT_DEFS;
+
 // ──────────────────────────────────────────────
 // Helper: filter agents by domain / layer
 // ──────────────────────────────────────────────
