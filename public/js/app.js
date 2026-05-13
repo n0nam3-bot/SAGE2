@@ -48,7 +48,8 @@ const SAGE = (() => {
       state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
     } else {
       // GitHub Pages mode — check for in-browser OAuth token
-      state.sheetsStatus = { authorized: !!Profile.getSheetsToken(), configured: !!Auth.getKeys().google_client_id };
+      const appsScriptUrl = SheetsClient.getAppsScriptUrl();
+      state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
     }
 
     UI.renderAll();
@@ -65,7 +66,8 @@ const SAGE = (() => {
     if (sportsMode) sportsMode.value = localStorage.getItem('sage_sports_date_mode') || 'day';
     state.initialized = true;
 
-    console.log('✅ SAGE ready |', LLM.activeProviderLabel());
+    window._sageState = state;
+    console.log('✅ SAGE2 ready |', LLM.activeProviderLabel(), '| Consensus:', LLM.isConsensusMode());
     UI.hideLoading();
   }
 
@@ -109,7 +111,7 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (state.sheetsStatus?.sheetsAuthorized || Profile.getSheetsToken()) {
+      if (state.sheetsStatus?.authorized) {
         const agents = await AgentManager.getAllAgents();
         await SheetsClient.logTradingSession(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'trading'));
@@ -173,14 +175,15 @@ const SAGE = (() => {
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (state.sheetsStatus?.sheetsAuthorized || Profile.getSheetsToken()) {
+      if (state.sheetsStatus?.authorized) {
         await SheetsClient.logSportsSession(result);
         const agents = await AgentManager.getAllAgents();
         await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'sports'));
       }
 
       UI.renderSportsResults(result);
-      UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
+      window._sageState = state;
+    UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
 
     } catch (err) {
       console.error('[SAGE] Sports session error:', err);
@@ -248,7 +251,7 @@ const SAGE = (() => {
     await AgentManager.recordOutcome(pick.agentId, pick.domain, correct, returnPct);
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (state.sheetsStatus.authorized) {
+    if (state.sheetsStatus?.authorized) {
       await SheetsClient.syncAgentPerformance(agents);
     }
     UI.renderPerformance();
@@ -283,7 +286,8 @@ const SAGE = (() => {
       if (LLM.IS_LOCAL) {
         state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
       } else {
-        state.sheetsStatus = { authorized: !!Profile.getSheetsToken(), sheetsAuthorized: !!Profile.getSheetsToken() };
+        const _scriptUrl = SheetsClient.getAppsScriptUrl();
+        state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
       }
       UI.updateStatus(state);
     },
