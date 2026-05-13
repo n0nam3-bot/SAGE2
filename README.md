@@ -31,7 +31,7 @@ SAGE tries each provider in priority order. If one is unavailable, it silently f
 ```bash
 # 1. Clone the repo
 git clone https://github.com/n0nam3-bot/SAGE2.git
-cd SAGE
+cd SAGE2
 
 # 2. Install dependencies
 npm install
