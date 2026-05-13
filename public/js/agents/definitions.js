@@ -767,7 +767,7 @@ Selection criteria (ALL must be true):
   sport, game, event_date (YYYY-MM-DD), game_time, bet_type, pick, odds (number), units (0.5-3), agents_in_agreement (array), confidence (0-100), full_reasoning (4-6 sentences)
 
 Output JSON only:
-{"final_picks": [{"sport": "", "game": "", "event_date": "", "game_time": "", "bet_type": "", "pick": "", "odds": 0, "units": 0, "agents_in_agreement": [], "confidence": 0, "full_reasoning": ""}], "passes": [{"game": "", "reason": ""}], "session_edge_summary": ""}\`
+{"final_picks": [{"sport": "", "game": "", "event_date": "", "game_time": "", "bet_type": "", "pick": "", "odds": 0, "units": 0, "agents_in_agreement": [], "confidence": 0, "full_reasoning": ""}], "passes": [{"game": "", "reason": ""}], "session_edge_summary": ""}`
   },
 
 };
