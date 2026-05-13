@@ -63,6 +63,162 @@ const LLM = (() => {
     return callCascade({ system, messages, maxTokens, preferredProvider: providerMode });
   }
 
+  // ── Multi-provider consensus: call all configured providers in parallel ──
+  // Returns merged picks/analysis from Gemini + Groq + OpenRouter simultaneously.
+  // Each provider runs the same prompt; results are merged before returning.
+  async function chatMultiProvider({ system, messages, maxTokens = 2000 }) {
+    const keys = Auth.getKeys();
+    const configured = [];
+    if (keys.gemini)     configured.push('gemini');
+    if (keys.groq)       configured.push('groq');
+    if (keys.openrouter) configured.push('openrouter');
+
+    // If only one (or zero) providers, fall back to regular chat
+    if (configured.length <= 1) return chat({ system, messages, maxTokens });
+
+    // Call all configured providers in parallel
+    const results = await Promise.allSettled(
+      configured.map(provider => callCascade({ system, messages, maxTokens, preferredProvider: provider }))
+    );
+
+    const successes = results
+      .map((r, i) => r.status === 'fulfilled' ? { provider: configured[i], text: r.value.text, model: r.value.model } : null)
+      .filter(Boolean);
+
+    if (successes.length === 0) throw new Error('All providers failed in consensus mode');
+    if (successes.length === 1) return { text: successes[0].text, provider: successes[0].provider, model: successes[0].model, consensus: false };
+
+    // Merge the responses
+    const merged = mergeProviderResponses(successes);
+    return { text: merged, provider: `consensus(${successes.map(s=>s.provider).join('+')})`, model: 'multi', consensus: true, providerCount: successes.length };
+  }
+
+  // Merge multiple JSON responses from different providers into one unified result.
+  // Strategy: parse each, union arrays, average scalar confidence fields.
+  function mergeProviderResponses(responses) {
+    const parsed = [];
+    for (const r of responses) {
+      try {
+        const m = r.text.match(/```(?:json)?\s*([\s\S]*?)```/) || r.text.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
+        if (m) parsed.push({ provider: r.provider, data: JSON.parse(m[1] || m[0]) });
+        else parsed.push({ provider: r.provider, data: JSON.parse(r.text) });
+      } catch {
+        // If can't parse, keep raw text
+        parsed.push({ provider: r.provider, data: null, raw: r.text });
+      }
+    }
+
+    const validParsed = parsed.filter(p => p.data != null);
+    if (validParsed.length === 0) {
+      // All failed to parse — return the longest raw text
+      const best = responses.reduce((a, b) => (a.text?.length || 0) > (b.text?.length || 0) ? a : b);
+      return best.text;
+    }
+
+    // If all are arrays (sports picks), merge them
+    if (validParsed.every(p => Array.isArray(p.data))) {
+      const allPicks = validParsed.flatMap(p => p.data.map(pick => ({ ...pick, _source_provider: p.provider })));
+      const deduped = dedupePicksByKey(allPicks);
+      // Average confidence across duplicate picks
+      const avgd = boostConsensusConfidence(allPicks, deduped);
+      return JSON.stringify(avgd);
+    }
+
+    // If all are objects, merge fields
+    if (validParsed.every(p => !Array.isArray(p.data) && typeof p.data === 'object')) {
+      const merged = mergeJsonObjects(validParsed.map(p => p.data));
+      // Mark which providers agreed
+      merged._consensus_providers = validParsed.map(p => p.provider);
+      return JSON.stringify(merged);
+    }
+
+    // Mixed — return best (highest confidence or longest)
+    const best = validParsed.reduce((a, b) => {
+      const sa = Array.isArray(a.data) ? a.data.length : (a.data?.conviction || a.data?.confidence || 0);
+      const sb = Array.isArray(b.data) ? b.data.length : (b.data?.conviction || b.data?.confidence || 0);
+      return sa >= sb ? a : b;
+    });
+    best.data._consensus_providers = validParsed.map(p => p.provider);
+    return JSON.stringify(best.data);
+  }
+
+  function dedupePicksByKey(picks) {
+    const seen = new Map();
+    for (const pick of picks) {
+      const key = [
+        (pick.sport || '').toLowerCase(),
+        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
+        (pick.bet_type || '').toLowerCase(),
+        (pick.pick || '').toLowerCase().slice(0, 20),
+      ].join('|');
+      if (!seen.has(key)) seen.set(key, []);
+      seen.get(key).push(pick);
+    }
+    return [...seen.values()].map(group => group[0]); // take first of each group
+  }
+
+  function boostConsensusConfidence(allPicks, deduped) {
+    return deduped.map(pick => {
+      const key = [
+        (pick.sport || '').toLowerCase(),
+        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
+        (pick.bet_type || '').toLowerCase(),
+        (pick.pick || '').toLowerCase().slice(0, 20),
+      ].join('|');
+      const matches = allPicks.filter(p => [
+        (p.sport || '').toLowerCase(),
+        (p.game || p.event || '').toLowerCase().slice(0, 30),
+        (p.bet_type || '').toLowerCase(),
+        (p.pick || '').toLowerCase().slice(0, 20),
+      ].join('|') === key);
+      const avgConf = matches.reduce((s, p) => s + (Number(p.confidence) || 50), 0) / matches.length;
+      const agreementBoost = (matches.length - 1) * 5; // +5 per extra provider that agrees
+      const providers = [...new Set(matches.map(p => p._source_provider).filter(Boolean))];
+      return {
+        ...pick,
+        confidence: Math.min(95, Math.round(avgConf + agreementBoost)),
+        agents_in_agreement: [...(pick.agents_in_agreement || []), ...providers.map(p => p + ' LLM')],
+        _provider_count: matches.length,
+      };
+    });
+  }
+
+  function mergeJsonObjects(objects) {
+    const merged = {};
+    for (const obj of objects) {
+      for (const [key, val] of Object.entries(obj)) {
+        if (!(key in merged)) { merged[key] = val; continue; }
+        // Arrays: concatenate and dedupe
+        if (Array.isArray(merged[key]) && Array.isArray(val)) {
+          merged[key] = [...merged[key], ...val.filter(v =>
+            !merged[key].some(existing => JSON.stringify(existing) === JSON.stringify(v))
+          )];
+          continue;
+        }
+        // Numbers: average
+        if (typeof merged[key] === 'number' && typeof val === 'number') {
+          merged[key] = (merged[key] + val) / 2;
+          continue;
+        }
+        // Strings: keep the longer/more detailed one
+        if (typeof merged[key] === 'string' && typeof val === 'string') {
+          if (val.length > merged[key].length) merged[key] = val;
+        }
+      }
+    }
+    return merged;
+  }
+
+  function isConsensusMode() {
+    return localStorage.getItem('sage_consensus_mode') === 'on';
+  }
+
+  function setConsensusMode(on) {
+    localStorage.setItem('sage_consensus_mode', on ? 'on' : 'off');
+  }
+
+
+
   // ── Server proxy (localhost self-host mode) ──
   async function callServerProxy({ system, messages, maxTokens, forceProvider = null }) {
     const body = { system, messages, max_tokens: maxTokens };
@@ -259,5 +415,5 @@ const LLM = (() => {
     return providerModeLabel(mode);
   }
 
-  return { chat, testKey, activeProviderLabel, IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode, providerModeLabel, resolveProviderOrder };
+  return { chat, chatMultiProvider, isConsensusMode, setConsensusMode, testKey, activeProviderLabel, IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode, providerModeLabel, resolveProviderOrder };
 })();
