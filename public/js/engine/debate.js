@@ -23,10 +23,11 @@ const DebateEngine = (() => {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const result = await LLM.chat({
+        const chatFn = LLM.isConsensusMode() ? LLM.chatMultiProvider : LLM.chat;
+        const result = await chatFn({
           system: systemPrompt,
           messages: [{ role: 'user', content: userMessage }],
-          maxTokens: 1500,
+          maxTokens: 1800,
         });
 
         const rawText = result.text || '';
@@ -311,12 +312,12 @@ Provide your picks in the specified JSON format.`;
     const cioResult = decisionResults.find(r => r.agentId === 's_cio');
     const cioPicks = normalizeSportsFinalPicks(cioResult?.parsed?.final_picks || []);
     const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults]);
-    const fallbackPicks = buildSportsFallbackPicks(allCandidates, 7, 3);
+    const fallbackPicks = buildSportsFallbackPicks(allCandidates, 5, 3);
     const mergedPicks = normalizeSportsFinalPicks([...cioPicks, ...fallbackPicks]);
-    results.finalPicks = mergedPicks.slice(0, 7);
+    results.finalPicks = mergedPicks.slice(0, 5);
 
     if (results.finalPicks.length < 3 && fallbackPicks.length) {
-      results.finalPicks = normalizeSportsFinalPicks(fallbackPicks).slice(0, Math.min(7, Math.max(3, fallbackPicks.length)));
+      results.finalPicks = normalizeSportsFinalPicks(fallbackPicks).slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
