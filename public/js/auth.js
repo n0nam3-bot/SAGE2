@@ -11,27 +11,6 @@ const Auth = (() => {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
 
-  function normalizeUsername(username) {
-    return String(username || '').trim().toLowerCase();
-  }
-
-  async function findProfile(username) {
-    const raw = String(username || '').trim();
-    const lower = normalizeUsername(raw);
-
-    const candidates = [];
-    if (raw) candidates.push(raw);
-    if (lower && lower !== raw) candidates.push(lower);
-
-    for (const key of candidates) {
-      const profile = await DB.get('profiles', key).catch(() => null);
-      if (profile) return profile;
-    }
-
-    const all = await DB.getAll('profiles').catch(() => []);
-    return all.find(p => normalizeUsername(p.username) === lower) || null;
-  }
-
   // ── Derive AES key from password + salt ──
   async function deriveKey(password, salt) {
     const keyMaterial = await crypto.subtle.importKey(
@@ -80,8 +59,7 @@ const Auth = (() => {
 
   // ── Register new user ──
   async function register(username, password, keys = {}) {
-    const safeUsername = normalizeUsername(username);
-    const existing = await findProfile(safeUsername);
+    const existing = await DB.get('profiles', username.toLowerCase()).catch(() => null);
     if (existing) throw new Error('Username already taken');
 
     const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -89,8 +67,8 @@ const Auth = (() => {
     const encrypted = await encrypt(aesKey, keys);
 
     const profile = {
-      username: safeUsername,
-      displayName: String(username).trim(),
+      username: username.toLowerCase(),
+      displayName: username,
       salt: bufToBase64(salt),
       iv: encrypted.iv,
       data: encrypted.data,
@@ -106,7 +84,7 @@ const Auth = (() => {
 
   // ── Login ──
   async function login(username, password) {
-    const profile = await findProfile(username);
+    const profile = await DB.get('profiles', username.toLowerCase()).catch(() => null);
     if (!profile) throw new Error('User not found');
 
     let decrypted;
@@ -120,9 +98,8 @@ const Auth = (() => {
 
     // Update lastLogin
     await DB.put('profiles', { ...profile, lastLogin: new Date().toISOString() });
-    const safeUsername = normalizeUsername(profile.username || username);
-    session = { username: safeUsername, displayName: profile.displayName || safeUsername, keys: { ...decrypted } };
-    localStorage.setItem('sage_last_user', safeUsername);
+    session = { username: username.toLowerCase(), displayName: profile.displayName, keys: { ...decrypted } };
+    localStorage.setItem('sage_last_user', username.toLowerCase());
     return session;
   }
 
@@ -176,19 +153,13 @@ const Auth = (() => {
   async function importProfile(jsonText) {
     const bundle = JSON.parse(jsonText);
     const profile = bundle.profile || bundle;
-    const safeUsername = normalizeUsername(profile.username);
-    if (!safeUsername || !profile.salt || !profile.iv || !profile.data)
+    if (!profile.username || !profile.salt || !profile.iv || !profile.data)
       throw new Error('Invalid profile file');
-    const existing = await findProfile(safeUsername);
-    if (existing) throw new Error(`Profile "${safeUsername}" already exists on this device`);
-    const normalizedProfile = {
-      ...profile,
-      username: safeUsername,
-      displayName: profile.displayName || safeUsername,
-    };
-    await DB.put('profiles', normalizedProfile);
-    if (bundle.appData) await DB.importScopedData(safeUsername, bundle.appData, { replace: true });
-    return safeUsername;
+    const existing = await DB.get('profiles', profile.username).catch(() => null);
+    if (existing) throw new Error(`Profile "${profile.username}" already exists on this device`);
+    await DB.put('profiles', profile);
+    if (bundle.appData) await DB.importScopedData(profile.username, bundle.appData, { replace: true });
+    return profile.username;
   }
 
   // ── List profiles on this device ──
@@ -224,7 +195,7 @@ const Auth = (() => {
   function isLoggedIn() { return session !== null; }
   function getSession() { return session; }
   function getKeys() { return session?.keys || {}; }
-  function getLastUser() { return normalizeUsername(localStorage.getItem('sage_last_user') || ''); }
+  function getLastUser() { return localStorage.getItem('sage_last_user') || ''; }
 
   return {
     register, login, saveKeys, changePassword,
