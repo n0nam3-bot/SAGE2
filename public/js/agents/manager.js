@@ -6,7 +6,13 @@ const AgentManager = (() => {
   async function init() {
     const existing = await DB.getAllAgents();
     const existingIds = new Set(existing.map(a => a.id));
-    const defs = Object.values(AGENT_DEFS);
+    const defsSource = (typeof globalThis !== 'undefined' && globalThis.AGENT_DEFS)
+      || (typeof window !== 'undefined' && window.AGENT_DEFS)
+      || (typeof AGENT_DEFS !== 'undefined' ? AGENT_DEFS : null);
+    if (!defsSource) {
+      throw new Error('Agent definitions not loaded. Ensure js/agents/definitions.js is included before manager.js');
+    }
+    const defs = Object.values(defsSource);
 
     // Check if any NEW agents need writing (skip if all already exist)
     const newDefs = defs.filter(def => !existingIds.has(def.id));
