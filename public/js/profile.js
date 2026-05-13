@@ -73,37 +73,29 @@ const Profile = (() => {
       <hr class="profile-divider">
 
       <div class="profile-section">
-        <h3>📊 Google Sheets <span class="profile-hint">(optional — logs all picks to your sheet)</span></h3>
-        <div class="key-row">
-          <label>Your Google Sheet ID</label>
-          <input type="text" id="key-sheet-id" value="${keys.sheet_id || getPersistedField('sheet_id') || ''}" placeholder="Paste the ID from your sheet URL">
+        <h3>📊 Google Sheets Sync <span class="profile-hint">(cross-device — logs all picks automatically)</span></h3>
+        <div style="background:rgba(6,182,212,0.07);border:1px solid rgba(6,182,212,0.2);border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:var(--text-secondary);line-height:1.7">
+          <strong style="color:var(--accent-cyan)">How to set up (2 minutes):</strong><br>
+          1. Open or create a Google Sheet → <strong>Extensions → Apps Script</strong><br>
+          2. Paste the contents of <strong>SAGE_AppScript.gs</strong> (included in your download) → Save<br>
+          3. Click <strong>Run → setupSAGE</strong> (creates all tabs)<br>
+          4. Click <strong>Deploy → New deployment → Web app → Anyone → Deploy</strong><br>
+          5. Copy the Web App URL and paste it below
         </div>
         <div class="key-row">
-          <label>Google OAuth Client ID <a href="https://console.cloud.google.com" target="_blank" class="get-key-link">Get one →</a></label>
-          <input type="text" id="key-google-client-id" value="${keys.google_client_id || getPersistedField('google_client_id') || ''}" placeholder="xxxx.apps.googleusercontent.com">
+          <label>Your Google Sheet ID <span style="font-weight:400;color:var(--text-muted)">(from the sheet URL)</span></label>
+          <input type="text" id="key-sheet-id" value="${keys.sheet_id || getPersistedField('sheet_id') || ''}" placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms">
         </div>
-        <div class="key-row" style="margin-top:8px">
-          <label>
-            Apps Script URL
-            <span style="font-size:10px;color:var(--accent-cyan);margin-left:6px;font-weight:400">⭐ Recommended — no OAuth needed, works on any device</span>
-          </label>
-          <input type="text" id="key-apps-script-url"
-            value="${keys.apps_script_url || getPersistedField('apps_script_url') || ''}"
-            placeholder="https://script.google.com/macros/s/AKfy.../exec">
-          <p style="font-size:11px;color:var(--text-muted);margin:5px 0 0">
-            Paste the Web App URL from your deployed Apps Script (included in the download as <strong>SAGE_AppScript.gs</strong>).
-            Lets you sync picks across devices without Google OAuth.
-            <a href="https://github.com/n0nam3-bot/SAGE2/blob/main/SETUP.md" target="_blank" style="color:var(--accent-blue)">Setup guide →</a>
-          </p>
-          <button class="btn-sm" style="margin-top:8px" onclick="Profile.testAppsScript()">🧪 Test Connection</button>
-          <span id="apps-script-status" style="font-size:12px;margin-left:10px;color:var(--text-muted)"></span>
+        <div class="key-row" style="margin-top:10px">
+          <label>Apps Script Web App URL</label>
+          <div class="key-input-row">
+            <input type="text" id="key-apps-script-url"
+              value="${keys.apps_script_url || getPersistedField('apps_script_url') || ''}"
+              placeholder="https://script.google.com/macros/s/AKfy.../exec">
+            <button class="btn-sm test-btn" onclick="Profile.testAppsScript()">Test</button>
+          </div>
+          <div id="apps-script-status" class="test-result" style="margin-top:4px"></div>
         </div>
-        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
-        <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">
-          <strong>Alternative:</strong> OAuth below (requires Google Cloud setup).
-        </p>
-        <button class="btn-sm" onclick="Profile.authorizeSheets()">🔗 Authorize My Google Account</button>
-        <span id="sheets-auth-status" style="font-size:12px;margin-left:10px;color:var(--text-muted)">Not connected</span>
       </div>
 
       <hr class="profile-divider">
@@ -133,16 +125,13 @@ const Profile = (() => {
       ollama_host:      document.getElementById('key-ollama-host')?.value.trim() || 'http://localhost:11434',
       ollama_model:     document.getElementById('key-ollama-model')?.value.trim() || 'llama3.3',
       sheet_id:         document.getElementById('key-sheet-id')?.value.trim() || '',
-      google_client_id: document.getElementById('key-google-client-id')?.value.trim() || '',
       apps_script_url:  document.getElementById('key-apps-script-url')?.value.trim() || '',
     };
     try {
       await Auth.saveKeys(password, keys);
       persistProfileField('sheet_id', keys.sheet_id);
-      persistProfileField('google_client_id', keys.google_client_id);
       persistProfileField('apps_script_url', keys.apps_script_url);
       localStorage.setItem('sage_sheet_id', keys.sheet_id || '');
-      localStorage.setItem('sage_google_client_id', keys.google_client_id || '');
       if (keys.apps_script_url) SheetsClient.setAppsScriptUrl(keys.apps_script_url);
       UI.showToast('Keys saved and encrypted ✅', 'success');
       document.getElementById('save-password').value = '';
@@ -201,7 +190,7 @@ const Profile = (() => {
 
   async function authorizeSheets() {
     const username = (Auth.getSession?.()?.username || Auth.getLastUser() || 'global').toLowerCase();
-    const clientId = document.getElementById('key-google-client-id')?.value.trim() || Auth.getKeys().google_client_id || localStorage.getItem(`sage_profile_${username}_google_client_id`) || localStorage.getItem('sage_google_client_id');
+    const clientId = Auth.getKeys().google_client_id || localStorage.getItem(`sage_profile_${username}_google_client_id`) || localStorage.getItem('sage_google_client_id');
     const sheetId = document.getElementById('key-sheet-id')?.value.trim() || Auth.getKeys().sheet_id || localStorage.getItem(`sage_profile_${username}_sheet_id`) || localStorage.getItem('sage_sheet_id');
     if (clientId) {
       localStorage.setItem(`sage_profile_${username}_google_client_id`, clientId);
@@ -236,27 +225,81 @@ const Profile = (() => {
   }
 
   async function testAppsScript() {
-    const url = document.getElementById('key-apps-script-url')?.value.trim();
+    const urlEl = document.getElementById('key-apps-script-url');
     const statusEl = document.getElementById('apps-script-status');
+    const url = urlEl?.value.trim();
+
     if (!url) {
-      if (statusEl) statusEl.textContent = '⚠️ Enter a URL first';
+      if (statusEl) { statusEl.textContent = '⚠️ Enter your Apps Script URL first'; statusEl.className = 'test-result warn'; }
       return;
     }
-    if (statusEl) statusEl.textContent = '⏳ Testing…';
+    if (!url.startsWith('https://script.google.com/macros/s/')) {
+      if (statusEl) { statusEl.textContent = '⚠️ URL should start with https://script.google.com/macros/s/…'; statusEl.className = 'test-result warn'; }
+      return;
+    }
+
+    if (statusEl) { statusEl.textContent = '⏳ Testing connection…'; statusEl.className = 'test-result'; }
+
+    // Apps Script GET with ?action=status — must follow redirects (Google auth redirects to the web app)
+    const testUrl = url.split('?')[0] + '?action=status';
+
+    // Use a timeout via Promise.race since AbortSignal.timeout has limited browser support
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+
     try {
-      const testUrl = url + (url.includes('?') ? '&' : '?') + 'action=status';
-      const res = await fetch(testUrl, { signal: AbortSignal.timeout(8000) });
-      const data = await res.json().catch(() => null);
+      const res = await fetch(testUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        if (statusEl) {
+          statusEl.textContent = res.status === 403
+            ? '❌ 403 Forbidden — make sure "Who has access" is set to Anyone (not Just Me)'
+            : '❌ HTTP ' + res.status + ' — check deployment settings';
+          statusEl.className = 'test-result err';
+        }
+        return;
+      }
+
+      // Try to parse JSON
+      const text = await res.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch { /* not JSON */ }
+
       if (data?.success) {
-        if (statusEl) statusEl.textContent = '✅ Connected! Tabs: ' + (data.tabs || []).join(', ');
+        if (statusEl) { statusEl.textContent = '✅ Connected — tabs: ' + (data.tabs || []).join(', '); statusEl.className = 'test-result ok'; }
         SheetsClient.setAppsScriptUrl(url);
-        UI.showToast('Apps Script connected ✅', 'success');
+        // Also save it immediately so it persists without needing Save Keys
+        const user = (Auth.getSession?.()?.username || Auth.getLastUser?.() || 'global').toLowerCase();
+        localStorage.setItem('sage_apps_script_url', url);
+        localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
+        UI.showToast('Sheets connected ✅', 'success');
+        // Refresh status bar
+        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
+        document.querySelectorAll('.status-item').forEach(el => {
+          if (el.textContent.includes('Sheets')) {
+            el.className = 'status-item ok';
+            el.innerHTML = '✅ Sheets';
+          }
+        });
+      } else if (text.includes('script.google.com') || text.includes('<!DOCTYPE')) {
+        if (statusEl) {
+          statusEl.textContent = '⚠️ Got HTML instead of JSON — deployment may need "Execute as: Me" and "Who has access: Anyone"';
+          statusEl.className = 'test-result warn';
+        }
       } else {
-        if (statusEl) statusEl.textContent = '⚠️ Got response but unexpected format. Check deployment settings.';
+        if (statusEl) { statusEl.textContent = '⚠️ Unexpected response — re-deploy the script and try again'; statusEl.className = 'test-result warn'; }
       }
     } catch (err) {
-      if (statusEl) statusEl.textContent = '❌ ' + (err.message || 'Connection failed');
-      UI.showToast('Apps Script test failed — check the URL and deployment', 'error');
+      clearTimeout(timer);
+      const msg = err.name === 'AbortError'
+        ? 'Timed out — check the URL is correct and the script is deployed'
+        : (err.message || 'Connection failed');
+      if (statusEl) { statusEl.textContent = '❌ ' + msg; statusEl.className = 'test-result err'; }
     }
   }
 
