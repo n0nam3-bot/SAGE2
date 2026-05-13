@@ -93,7 +93,7 @@ const Profile = (() => {
           <p style="font-size:11px;color:var(--text-muted);margin:5px 0 0">
             Paste the Web App URL from your deployed Apps Script (included in the download as <strong>SAGE_AppScript.gs</strong>).
             Lets you sync picks across devices without Google OAuth.
-            <a href="https://github.com/YOUR_USERNAME/SAGE/blob/main/SETUP.md" target="_blank" style="color:var(--accent-blue)">Setup guide →</a>
+            <a href="https://github.com/n0nam3-bot/SAGE2/blob/main/SETUP.md" target="_blank" style="color:var(--accent-blue)">Setup guide →</a>
           </p>
           <button class="btn-sm" style="margin-top:8px" onclick="Profile.testAppsScript()">🧪 Test Connection</button>
           <span id="apps-script-status" style="font-size:12px;margin-left:10px;color:var(--text-muted)"></span>
