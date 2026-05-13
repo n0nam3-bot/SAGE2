@@ -29,40 +29,114 @@ const UI = (() => {
   // AGENT CARDS
   // ════════════════════════════════════════
   async function renderAgents() {
-    const container = document.getElementById('agents-grid');
+    const container = document.getElementById('agents-container');
     if (!container) return;
     const agents = await AgentManager.getAllAgents();
-    const byDomain = { trading: agents.filter(a => a.domain === 'trading'), sports: agents.filter(a => a.domain === 'sports') };
+    if (!agents.length) { container.innerHTML = '<div class="empty-agents">No agents initialized yet. Run a session first.</div>'; return; }
 
-    container.innerHTML = Object.entries(byDomain).map(([domain, domainAgents]) => {
-      const byLayer = {};
-      domainAgents.forEach(a => {
-        const k = `${a.layer}-${a.layerName}`;
-        if (!byLayer[k]) byLayer[k] = [];
-        byLayer[k].push(a);
-      });
-      return `
-        <div class="domain-section">
-          <div class="domain-header ${domain}">
-            <span>${domain === 'trading' ? '📈' : '🎰'} ${domain.toUpperCase()} AGENTS</span>
-            <div class="domain-actions">
-              <button class="btn-sm" onclick="SAGE.runAutoresearch('${domain}')">🔬 Autoresearch</button>
-              <button class="btn-sm" onclick="SAGE.runBlindSpotDetection('${domain}')">🔍 Blind Spots</button>
-            </div>
-          </div>
-          ${Object.entries(byLayer).sort(([a],[b]) => parseInt(a) - parseInt(b)).map(([layerKey, layerAgents]) => {
-            const [layerNum, layerName] = layerKey.split('-');
-            return `
-              <div class="layer-section">
-                <div class="layer-label">Layer ${layerNum} — ${layerName}</div>
-                <div class="agents-row">
-                  ${layerAgents.map(a => renderAgentCard(a)).join('')}
-                </div>
-              </div>`;
-          }).join('')}
-        </div>`;
-    }).join('');
+    // Compute live stats from DB picks (so they show up even before manual outcome marking)
+    const allPicks = await DB.getAllPicks();
+    const liveStats = {};
+    for (const pick of allPicks) {
+      const aid = pick.agentId;
+      if (!aid) continue;
+      if (!liveStats[aid]) liveStats[aid] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
+      liveStats[aid].predictions++;
+      if (pick.outcomeDate) {
+        if (pick.correct) { liveStats[aid].correct++; liveStats[aid].wins++; }
+        else { liveStats[aid].losses++; }
+        liveStats[aid].totalReturn += (pick.returnPct || 0);
+      }
+    }
+
+    agents.forEach(a => {
+      const live = liveStats[a.id];
+      if (!live) return;
+      const stored = a.stats || {};
+      // Use whichever is higher (live pick count vs stored)
+      if (live.predictions > (stored.predictions || 0)) {
+        a.stats = {
+          predictions: live.predictions,
+          correct: live.correct,
+          roi: live.predictions > 0 ? (live.totalReturn / live.predictions) * 100 : 0,
+          sharpe: stored.sharpe || 0,
+          totalReturn: live.totalReturn,
+        };
+      }
+    });
+
+    const tradingAgents = agents.filter(a => a.domain === 'trading').sort((a, b) => b.weight - a.weight);
+    const sportsAgents  = agents.filter(a => a.domain === 'sports').sort((a, b) => b.weight - a.weight);
+
+    container.innerHTML = `
+      <div class="agents-header">
+        <h2>🧠 Agent Performance</h2>
+        <div class="agent-header-actions">
+          <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
+          <button class="btn-sm" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
+          <button class="btn-sm" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
+        </div>
+      </div>
+      ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
+      ${renderDomainAgentTable('Sports', sportsAgents, liveStats)}
+    `;
   }
+
+  function renderDomainAgentTable(label, agents, liveStats) {
+    if (!agents.length) return '';
+    return `
+      <div class="agent-domain-section">
+        <h3 class="domain-label">${label === 'Trading' ? '📈' : '🏆'} ${label} Agents (${agents.length})</h3>
+        <div class="agent-table-wrap">
+          <table class="agent-table">
+            <thead><tr>
+              <th>Agent</th><th>Layer</th><th>Weight</th>
+              <th>Picks</th><th>W/L</th><th>Accuracy</th>
+              <th>${label === 'Trading' ? 'Sharpe' : 'ROI %'}</th>
+              <th>Rewrites</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              ${agents.map(a => {
+                const live = liveStats[a.id] || {};
+                const picks = Math.max(a.stats?.predictions || 0, live.predictions || 0);
+                const wins  = live.wins ?? a.stats?.correct ?? 0;
+                const losses = live.losses ?? 0;
+                const acc   = picks > 0 ? ((wins / picks) * 100).toFixed(0) + '%' : '—';
+                const metric = label === 'Trading'
+                  ? (a.stats?.sharpe?.toFixed(3) || '—')
+                  : (picks > 0 ? (a.stats?.roi?.toFixed(1) || '0.0') + '%' : '—');
+                const wc = a.weight >= 1.5 ? '#22c55e' : a.weight <= 0.5 ? '#ef4444' : '#f59e0b';
+                const wBar = Math.min(100, (a.weight / 2.5) * 100);
+                const status = a.shadowMode ? '🔬 Shadow' : (a.active ? '✅ Active' : '⏸ Paused');
+                return `<tr class="agent-row" onclick="UI.showAgentDetail('${a.id}')">
+                  <td>
+                    <div class="agent-name-cell">
+                      <span class="agent-name-text">${a.name}</span>
+                      ${a.blindSpots?.length ? '<span class="badge-mini warn">⚠️</span>' : ''}
+                    </div>
+                  </td>
+                  <td><span class="layer-badge">${a.layerName || 'L' + a.layer}</span></td>
+                  <td>
+                    <div class="weight-cell">
+                      <span style="color:${wc};font-weight:700">${a.weight.toFixed(2)}×</span>
+                      <div class="weight-bar-mini"><div style="width:${wBar}%;background:${wc}"></div></div>
+                    </div>
+                  </td>
+                  <td>${picks}</td>
+                  <td>${picks > 0 ? wins + 'W / ' + losses + 'L' : '—'}</td>
+                  <td>${acc}</td>
+                  <td>${metric}</td>
+                  <td>${a.rewrites || 0}</td>
+                  <td>${status}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+
 
   function renderAgentCard(agent) {
     const pct = agent.stats?.predictions > 0
@@ -658,13 +732,23 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const el = document.getElementById('status-bar');
     if (!el) return;
 
-    const sheetsOk = LLM.IS_LOCAL
-      ? state.sheetsStatus?.sheetsAuthorized
-      : !!Profile?.getSheetsToken?.();
+    const sheetsOk = state.sheetsStatus?.authorized
+      || !!Profile?.getSheetsToken?.()
+      || !!SheetsClient?.getAppsScriptUrl?.();
+
+    const consensusOn = LLM.isConsensusMode?.();
+    const keys = Auth?.getKeys?.() || {};
+    const activeProviders = ['gemini','groq','openrouter'].filter(p => !!keys[p]);
 
     el.innerHTML = `
       <span class="status-item ok">${LLM.activeProviderLabel()}</span>
-      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}">
+      ${activeProviders.length > 1 ? `
+        <span class="status-item ${consensusOn ? 'ok' : ''}" style="cursor:pointer"
+          onclick="LLM.setConsensusMode(!LLM.isConsensusMode()); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isConsensusMode() ? 'Consensus mode ON — all providers vote on each agent 🤝' : 'Consensus mode OFF', 'info');"
+          title="Click to toggle multi-LLM consensus mode">
+          ${consensusOn ? '🤝 Consensus ON' : '⚡ Single LLM'} (${activeProviders.length} keys)
+        </span>` : ''}
+      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="UI.switchTab('profile')" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
       <span class="status-item">
