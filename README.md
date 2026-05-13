@@ -30,7 +30,7 @@ SAGE tries each provider in priority order. If one is unavailable, it silently f
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/SAGE.git
+git clone https://github.com/n0nam3-bot/SAGE2.git
 cd SAGE
 
 # 2. Install dependencies
@@ -44,7 +44,7 @@ cp .env.example .env
 ollama serve
 ollama pull llama3.3   # or: mistral, llama3.1, qwen2.5, etc.
 
-# 5. Start SAGE
+# 5. Start SAGE2
 npm start
 # → Open http://localhost:3000
 ```
@@ -181,7 +181,7 @@ SAGE detects "blind spots" — patterns in repeated losses shared across agents.
 ## Project Structure
 
 ```
-SAGE/
+SAGE2/
 ├── server.js              # Express server — provider proxy, Sheets OAuth, results API
 ├── providers.js           # LLM cascade: Ollama → Gemini → Groq → OpenRouter
 ├── .env.example           # Environment template (copy to .env)
@@ -224,12 +224,12 @@ SAGE/
 ## Pushing to GitHub
 
 ```bash
-# First time setup (from inside the SAGE folder)
+# First time setup (from inside the SAGE2 folder)
 git init
 git add .
-git commit -m "Initial SAGE commit"
+git commit -m "Initial SAGE2 commit"
 git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/SAGE.git
+git remote add origin https://github.com/n0nam3-bot/SAGE2.git
 git push -u origin main
 
 # After future changes
