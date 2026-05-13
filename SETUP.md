@@ -17,7 +17,7 @@ ollama pull qwen2.5
 ## Step 3 — Clone & install SAGE
 ```bash
 git clone https://github.com/n0nam3-bot/SAGE2.git
-cd SAGE
+cd SAGE2
 npm install
 ```
 
@@ -37,7 +37,7 @@ GROQ_API_KEY=       # https://console.groq.com/keys
 OPENROUTER_API_KEY= # https://openrouter.ai/keys
 ```
 
-## Step 5 — Start Ollama + SAGE
+## Step 5 — Start Ollama + SAGE2
 ```bash
 # Terminal 1
 ollama serve
