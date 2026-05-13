@@ -16,7 +16,7 @@ ollama pull qwen2.5
 
 ## Step 3 — Clone & install SAGE
 ```bash
-git clone https://github.com/n0nam3-bot/SAGE.git
+git clone https://github.com/n0nam3-bot/SAGE2.git
 cd SAGE
 npm install
 ```
