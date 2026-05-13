@@ -36,22 +36,33 @@ const SAGE = (() => {
       oddsNudge.style.display = Auth.getKeys().odds_api_key ? 'none' : 'flex';
     }
 
+    const _setLoadMsg = (msg) => {
+      const el = document.getElementById('loading-text') ||
+                 document.querySelector('#loading-overlay .loading-text') ||
+                 document.querySelector('.loading-text');
+      if (el) el.textContent = msg;
+    };
+
+    _setLoadMsg('Loading agents…');
     await AgentManager.init();
+
+    _setLoadMsg('Detecting market regime…');
     await RegimeEngine.loadRegime();
     state.regimes = RegimeEngine.currentRegime();
 
-    // Check sheets status (only relevant for self-hosted with server)
+    // Check sheets status
     if (Profile.hydrateSheetsToken) {
       await Profile.hydrateSheetsToken().catch(() => {});
     }
     if (LLM.IS_LOCAL) {
+      _setLoadMsg('Connecting to server…');
       state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
     } else {
-      // GitHub Pages mode — check for in-browser OAuth token
       const appsScriptUrl = SheetsClient.getAppsScriptUrl();
       state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
     }
 
+    _setLoadMsg('Building dashboard…');
     UI.renderAll();
     UI.updateStatus(state);
 
