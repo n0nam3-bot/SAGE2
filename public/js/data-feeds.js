@@ -10,6 +10,10 @@ const DataFeeds = (() => {
   const FRED    = 'https://api.stlouisfed.org/fred';
   const ALLORI  = 'https://api.allorigins.win/get?url=';
 
+  function userTimeZone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+  }
+
   // ── Safe fetch with timeout ──
   async function sf(url, timeout = 7000) {
     const ctrl = new AbortController();
@@ -36,52 +40,24 @@ const DataFeeds = (() => {
   function normalizeOddPrice(price) { if (price == null || price === '') return null; const n = Number(String(price).replace(/[^\d+\-]/g, '')); return Number.isFinite(n) ? n : null; }
 
 
-  function buildSportsDateLabel(pickedDate, mode) {
+  function buildSportsDateLabel(pickedDate) {
     const d = new Date(`${pickedDate}T00:00:00`);
     if (Number.isNaN(d.getTime())) return 'Today';
-    if (mode === 'week') {
-      const start = startOfWeekSunday(d);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 6);
-      return `Week of ${start.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
-    }
     return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   }
 
-  function startOfWeekSunday(date) {
-    const d = new Date(date);
-    const day = d.getDay();
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - day);
-    return d;
-  }
-
-  function buildDateRange(pickedDate, mode) {
+  function buildDateRange(pickedDate) {
     const base = new Date(`${pickedDate}T00:00:00`);
     if (Number.isNaN(base.getTime())) return {};
-    let start = base;
-    let end = new Date(base);
-    if (mode === 'week') {
-      start = startOfWeekSunday(base);
-      end = new Date(start);
-      end.setDate(end.getDate() + 7);
-    } else {
-      end.setDate(end.getDate() + 1);
-    }
+    const start = new Date(base);
+    const end = new Date(base);
+    end.setDate(end.getDate() + 1);
     return { from: start.toISOString(), to: end.toISOString() };
   }
 
-  function getSportsDateList(pickedDate, mode) {
+  function getSportsDateList(pickedDate) {
     const base = new Date(`${pickedDate}T00:00:00`);
     if (Number.isNaN(base.getTime())) return [new Date().toISOString().slice(0, 10)];
-    if (mode === 'week') {
-      const start = startOfWeekSunday(base);
-      return Array.from({ length: 7 }, (_, i) => {
-        const d = new Date(start);
-        d.setDate(start.getDate() + i);
-        return d.toISOString().slice(0, 10);
-      });
-    }
     return [base.toISOString().slice(0, 10)];
   }
 
@@ -98,7 +74,7 @@ const DataFeeds = (() => {
       const state = String(e.status?.type?.state || '').toLowerCase();
       const detail = e.status?.type?.detail || e.status?.type?.shortDetail || e.status?.type?.description || '';
       const time = Number.isFinite(start.getTime())
-        ? start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' })
+        ? start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: userTimeZone(), timeZoneName: 'short' })
         : '';
       const hasScheduledTime = !!time && !/tbd|tba|postponed|delayed/i.test(time);
       return {
@@ -337,14 +313,15 @@ const DataFeeds = (() => {
   // ═══════════════════════════════════════════════
   async function buildSportsContext(keys = {}, userNotes = '', options = {}) {
     const pickedDate = options.date || new Date().toISOString().slice(0, 10);
-    const dateMode = options.mode === 'week' ? 'week' : 'day';
+    const dateMode = 'day';
     const dateLabel = buildSportsDateLabel(pickedDate, dateMode);
     const range = buildDateRange(pickedDate, dateMode);
-    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nSelected range: ${dateLabel}\n`];
+    const tz = userTimeZone();
+    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nUser timezone: ${tz}\nSelected date: ${dateLabel}\n`];
     const fetched = [];
     const oddsKey = keys.odds_api_key;
 
-    // ── ESPN schedules — selected date or week ──
+    // ── ESPN schedules — selected date only ──
     const dateList = getSportsDateList(pickedDate, dateMode);
     const daySnapshots = await Promise.all(dateList.map(async day => ({
       day,
@@ -378,8 +355,9 @@ const DataFeeds = (() => {
 
     const upcomingOnly = games => (Array.isArray(games) ? games : []).filter(g => {
       const startMs = g.startTime ? Date.parse(g.startTime) : NaN;
-      const hasValidTime = !!g.hasScheduledTime && !!g.time && !/tbd|tba|postponed|delayed/i.test(String(g.time));
-      return (g.statusState || 'pre') === 'pre' && !!g.awayTeam && !!g.homeTeam && hasValidTime && Number.isFinite(startMs) && startMs > Date.now();
+      const hasValidTime = !!g.hasScheduledTime && !!g.time && !/tbd|tba|postponed|delayed|live|in progress|final/i.test(String(g.time));
+      const preGame = String(g.statusState || 'pre').toLowerCase() === 'pre';
+      return preGame && !!g.awayTeam && !!g.homeTeam && hasValidTime && Number.isFinite(startMs) && startMs > Date.now();
     });
 
     const scheduleData = {
@@ -418,7 +396,7 @@ const DataFeeds = (() => {
         if (!odds.length) continue;
         lines.push(`\n=== ${name} LIVE ODDS (${dateLabel}) ===`);
         odds.slice(0, 8).forEach(g => {
-          const time = g.commenceTime ? new Date(g.commenceTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }) : '';
+          const time = g.commenceTime ? new Date(g.commenceTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: userTimeZone(), timeZoneName: 'short' }) : '';
           const ml = `${g.away} (${g.awayML ?? '—'}) @ ${g.home} (${g.homeML ?? '—'})`;
           const spread = g.spread ? ` | Spread: ${g.spread}` : '';
           const total = g.total != null ? ` | O/U: ${g.total}` : '';
