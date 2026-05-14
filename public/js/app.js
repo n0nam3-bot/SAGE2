@@ -77,7 +77,7 @@ const SAGE = (() => {
       _setLoadMsg('Connecting to server…');
       state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
     } else {
-      const appsScriptUrl = SheetsClient.getAppsScriptUrl();
+      const appsScriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
       state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
     }
 
@@ -149,8 +149,8 @@ const SAGE = (() => {
 
       if (state.sheetsStatus?.authorized) {
         const agents = await AgentManager.getAllAgents();
-        await SheetsClient.logTradingSession(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
-        await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'trading'));
+        await globalThis.SheetsClient?.logTradingSession?.(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
+        await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'trading'));
       }
 
       UI.renderTradingResults(result);
@@ -216,9 +216,9 @@ const SAGE = (() => {
       await AgentManager.applyDarwinianUpdate('sports');
 
       if (state.sheetsStatus?.authorized) {
-        await SheetsClient.logSportsSession(result);
+        await globalThis.SheetsClient?.logSportsSession?.(result);
         const agents = await AgentManager.getAllAgents();
-        await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'sports'));
+        await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
       }
 
       UI.renderSportsResults(result);
@@ -324,7 +324,7 @@ Spawn a new specialist agent?`);
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
     if (state.sheetsStatus?.authorized) {
-      await SheetsClient.syncAgentPerformance(agents);
+      await globalThis.SheetsClient?.syncAgentPerformance?.(agents);
     }
     UI.renderPerformance();
     UI.renderAgents();
@@ -363,7 +363,7 @@ Spawn a new specialist agent?`);
       if (LLM.IS_LOCAL) {
         state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
       } else {
-        const _scriptUrl = SheetsClient.getAppsScriptUrl();
+        const _scriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
         state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
       }
       UI.updateStatus(state);
