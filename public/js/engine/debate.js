@@ -325,7 +325,7 @@ Provide your picks in the specified JSON format.`;
         supportAnalysis: extractSupportData(supportResults),
         consensusBrief,
         agentWeights,
-        consensusMode: LLM.isConsensusMode(),
+        hyperMode: LLM.isHyperMode?.() || LLM.isConsensusMode?.(),
       },
     };
     const decisionResults = await runLayerSequential(decisionAgents, decisionCtx, 'sports');
@@ -350,13 +350,21 @@ Provide your picks in the specified JSON format.`;
 
     const enrichedPicks = enrichFinalSportsPicks(rankedPicks, consensusBrief, scheduleData);
     const scheduleFiltered = filterUpcomingSportsPicks(enrichedPicks, scheduleData);
-    results.finalPicks = scheduleFiltered.slice(0, 5);
+    let finalPicks = consolidateSportsFinalPicks(scheduleFiltered);
+
+    if (LLM.isHyperMode?.()) {
+      finalPicks = consolidateSportsFinalPicks(await runHyperReview('sports', finalPicks, ctx, consensusBrief));
+    }
+
+    results.finalPicks = finalPicks.slice(0, 5);
 
     if (results.finalPicks.length < 3 && fallbackPicks.length) {
-      results.finalPicks = filterUpcomingSportsPicks(
+      const fallbackFinal = consolidateSportsFinalPicks(filterUpcomingSportsPicks(
         enrichFinalSportsPicks(normalizeSportsFinalPicks(fallbackPicks), consensusBrief, scheduleData),
         scheduleData
-      ).slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
+      ));
+      results.finalPicks = (LLM.isHyperMode?.() ? consolidateSportsFinalPicks(await runHyperReview('sports', fallbackFinal, ctx, consensusBrief)) : fallbackFinal)
+        .slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
@@ -717,17 +725,19 @@ Provide your picks in the specified JSON format.`;
       for (const [provider, agents] of g.providerAgents.entries()) {
         providerAgents[provider] = [...agents].filter(Boolean);
       }
+      const agentIds = [...g.sourceAgents].filter(Boolean);
+      const llmList = [...g.llms].filter(Boolean);
       pickAgreementMap[key] = {
         sport: g.sport,
         game: g.game,
         market: g.market,
         pick: g.pick,
         odds: g.odds,
-        agent_ids: [...g.sourceAgents].filter(Boolean),
-        agents_in_agreement: [...g.sourceAgents].filter(Boolean),
-        llms: [...g.llms].filter(Boolean),
+        agent_ids: agentIds,
+        agents_in_agreement: agentIds,
+        llms: llmList,
         provider_agents: providerAgents,
-        agreementCount: new Set([...g.sourceAgents].filter(Boolean)).size,
+        agreementCount: Math.max(agentIds.length, llmList.length),
         avgConfidence: g.confidence.length ? Math.round(g.confidence.reduce((a, b) => a + b, 0) / g.confidence.length) : 0,
       };
       pickAgreementMap[key].agreement_breakdown = formatAgreementBreakdown(pickAgreementMap[key]);
@@ -803,6 +813,66 @@ Provide your picks in the specified JSON format.`;
       out.push(finalPick);
     }
     return out;
+  }
+
+
+  function consolidateSportsFinalPicks(picks) {
+    const groups = new Map();
+    for (const raw of Array.isArray(picks) ? picks : []) {
+      const pick = normalizeSportsPick(raw);
+      if (!pick) continue;
+      const key = dedupeSportsPickKey(pick);
+      if (!groups.has(key)) {
+        groups.set(key, { ...pick, _sources: new Set(), _llms: new Set(), _agentIds: new Set(), _agreementCount: 0 });
+      }
+      const g = groups.get(key);
+      g._agreementCount += 1;
+      if (pick.source_agent) g._agentIds.add(pick.source_agent);
+      if (pick.source_agent_name) g._sources.add(pick.source_agent_name);
+      (pick.agents_in_agreement || []).forEach(a => a && g._sources.add(a));
+      (pick.agreement_agent_ids || []).forEach(a => a && g._agentIds.add(a));
+      (pick.agreement_llms || []).forEach(l => l && g._llms.add(l));
+      (pick.source_providers || []).forEach(l => l && g._llms.add(l));
+      if ((Number(pick.confidence) || 0) > (Number(g.confidence) || 0)) {
+        Object.assign(g, pick);
+      }
+    }
+    return [...groups.values()].map(g => {
+      const agents = [...g._sources].filter(Boolean);
+      const agentIds = [...g._agentIds].filter(Boolean);
+      const llms = [...g._llms].filter(Boolean);
+      const breakdown = llms.length || agents.length ? `${llms.length ? llms.map(l => `${l} LLM`).join(' | ') : ''}${llms.length && agents.length ? ' | ' : ''}${agents.length ? agents.join(', ') : ''}` : '';
+      return {
+        ...g,
+        agents_in_agreement: agents,
+        agreement_agent_ids: agentIds,
+        agreement_llms: llms,
+        agreement_count: Math.max(g._agreementCount || 0, agents.length, agentIds.length, llms.length),
+        agreement_breakdown: breakdown,
+        source_agent_name: g.source_agent_name || (agents[0] || ''),
+      };
+    });
+  }
+
+  async function runHyperReview(domain, picks, ctx, consensusBrief) {
+    if (!LLM.isHyperMode?.()) return picks;
+    const role = domain === 'trading' ? 'Senior Hedge Fund Risk Manager' : 'Professional Sports Bettor';
+    const prompt = domain === 'trading'
+      ? `You are the final ${role}. Review the approved trading ideas below and remove anything redundant, unsupported, too correlated, or weakly justified. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Preserve only the best ideas.
+
+Context:
+${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`
+      : `You are the final ${role}. Review the approved sports picks below and remove any live games, TBD times, duplicates, weak edges, or anything that failed the checks. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Keep one pick per unique game/market/side and preserve agreement metadata.
+
+Context:
+${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`;
+    try {
+      const result = await LLM.chatMultiProvider({ system: '', messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
+      const parsed = parseMaybeJson(result.text);
+      const approved = parsed?.approved_picks || parsed?.approved || (Array.isArray(parsed) ? parsed : null);
+      if (Array.isArray(approved) && approved.length) return approved;
+    } catch (e) { /* keep original picks */ }
+    return picks;
   }
 
   function filterUpcomingSportsPicks(picks, scheduleData) {
