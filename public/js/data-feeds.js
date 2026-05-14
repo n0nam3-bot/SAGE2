@@ -157,8 +157,8 @@ const DataFeeds = (() => {
     nextCache.sports[cacheKey] = { fetchedAt, rows };
     writeOddsCache(nextCache);
 
-    if (options.persistFreshOdds && typeof SheetsClient !== 'undefined' && SheetsClient.logFreshOddsSnapshot) {
-      SheetsClient.logFreshOddsSnapshot({ sportKey, sportName: options.sportName || sportKey, fetchedAt, rows, range }).catch(() => {});
+    if (options.persistFreshOdds && globalThis.SheetsClient?.logFreshOddsSnapshot) {
+      globalThis.SheetsClient.logFreshOddsSnapshot({ sportKey, sportName: options.sportName || sportKey, fetchedAt, rows, range }).catch(() => {});
     }
 
     return { rows, fetchedAt, fromCache: false };
