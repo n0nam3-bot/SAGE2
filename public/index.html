@@ -128,7 +128,6 @@
     <button class="tab-btn active" data-tab="trading">📈 Trading</button>
     <button class="tab-btn" data-tab="sports">🎰 Sports</button>
     <button class="tab-btn" data-tab="agents">🤖 Agents</button>
-    <button class="tab-btn" data-tab="performance">📊 Performance</button>
     <button class="tab-btn" data-tab="regime">🌡️ Regime</button>
     <button class="tab-btn" data-tab="backtest">⏪ Backtest</button>
   </nav>
@@ -299,15 +298,9 @@ Leave blank — SAGE fetches schedules, odds, and injury news itself." style="mi
 
     <!-- ── AGENTS TAB ── -->
     <div class="tab-pane" id="tab-agents">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-        <div>
-          <h2 style="font-size:18px;font-weight:700">Agent Roster</h2>
-          <p style="font-size:13px;color:var(--text-muted)">32 agents. Click any card for prompt history, performance, and blind spots.</p>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn-primary" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
-          <button class="btn-primary" style="background:var(--accent-purple)" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
-        </div>
+      <div style="margin-bottom:20px">
+        <h2 style="font-size:18px;font-weight:700">Agent Roster</h2>
+        <p style="font-size:13px;color:var(--text-muted)">32 agents. Click any card for prompt history, performance, and blind spots.</p>
       </div>
       <div id="agents-container"></div>
     </div>
