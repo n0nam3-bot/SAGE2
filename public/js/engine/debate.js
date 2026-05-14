@@ -1,12 +1,6 @@
-// engine/debate.js — Multi-agent layered debate engine with Hyper Mode
+// engine/debate.js — Multi-agent layered debate engine
 
 const DebateEngine = (() => {
-
-  // ── Global Hyper Mode flag ──
-  let _hyperMode = false;
-
-  function setHyperMode(enabled) { _hyperMode = enabled; }
-  function isHyperMode() { return _hyperMode; }
 
   function normalizeConfidence(value) {
     const n = Number(value);
@@ -14,30 +8,42 @@ const DebateEngine = (() => {
     return n <= 10 ? Math.round(n * 10) : Math.max(0, Math.min(100, Math.round(n)));
   }
 
+  function hasSpecificGameTime(value) {
+    const s = String(value || '').trim();
+    if (!s) return false;
+    if (/^(tbd|tba|tbc|n\/a|na|none|unknown|—|-)+$/i.test(s)) return false;
+    return /\d/.test(s) && !/\blive\b|\bfinal\b|\bpostponed\b|\bdelayed\b/i.test(s);
+  }
+
+  function isIrrelevantBetLabel(value) {
+    const s = String(value || '').trim().toLowerCase();
+    if (!s) return true;
+    return /^(none|no bet|pass|skip|n\/a|na|unknown|irrelevant)(\b|\s|—|-)/i.test(s)
+      || /irrelevant to this matchup/i.test(s)
+      || /no action/i.test(s)
+      || /not applicable/i.test(s);
+  }
+
   function isAllowedSportsOdds(odds) {
     const n = Number(odds);
-    if (!Number.isFinite(n)) return false;
+    if (!Number.isFinite(n) || n === 0) return false;
     return n >= -200;
   }
 
   // ── Call LLM for a single agent ──
-  // In Hyper Mode: calls all available providers and synthesizes their responses
   async function callAgent(agent, contextData, domain) {
     const systemPrompt = agent.shadowMode ? agent.shadowMode.newPrompt : agent.prompt;
     const userMessage = buildUserMessage(agent, contextData, domain);
     const MAX_RETRIES = 3;
     let lastError = null;
 
-    if (_hyperMode) {
-      return callAgentHyper(agent, systemPrompt, userMessage, domain);
-    }
-
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const result = await LLM.chat({
+        const chatFn = LLM.isConsensusMode() ? LLM.chatMultiProvider : LLM.chat;
+        const result = await chatFn({
           system: systemPrompt,
           messages: [{ role: 'user', content: userMessage }],
-          maxTokens: 1500,
+          maxTokens: 1800,
         });
 
         const rawText = result.text || '';
@@ -62,7 +68,9 @@ const DebateEngine = (() => {
           domain: agent.domain,
           weight: agent.weight,
           provider: result.provider,
-          model: result.model,
+          providerOutputs: result.providerOutputs || [],
+          consensus: !!result.consensus,
+          consensusProviderCount: result.providerCount || (result.providerOutputs?.length || 0),
           raw: rawText,
           parsed,
           timestamp: new Date().toISOString(),
@@ -101,162 +109,6 @@ const DebateEngine = (() => {
     };
   }
 
-  // ── Hyper Mode: call all available providers for this agent, then synthesize ──
-  async function callAgentHyper(agent, systemPrompt, userMessage, domain) {
-    let hyperResults = [];
-
-    try {
-      if (LLM.IS_LOCAL) {
-        // Server handles parallel calls
-        const res = await fetch('/api/chat/hyper', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userMessage }],
-            max_tokens: 1500,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          hyperResults = data.results || [];
-        }
-      } else {
-        hyperResults = await LLM.chatHyper({
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }],
-          maxTokens: 1500,
-        });
-      }
-    } catch (e) {
-      console.warn('[HyperMode] Parallel call failed, falling back to single:', e.message);
-    }
-
-    // If only one result or fallback, use it directly
-    if (hyperResults.length <= 1) {
-      const single = hyperResults[0] || await LLM.chat({
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
-        maxTokens: 1500,
-      }).catch(e => ({ text: '', error: e.message }));
-
-      const rawText = single.text || '';
-      let parsed = null;
-      try {
-        const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/) || rawText.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
-        parsed = jsonMatch ? JSON.parse(jsonMatch[1] || jsonMatch[0]) : JSON.parse(rawText);
-      } catch { parsed = { raw_response: rawText.slice(0, 500) }; }
-
-      return {
-        agentId: agent.id, agentName: agent.name, layer: agent.layer,
-        domain: agent.domain, weight: agent.weight,
-        provider: single.provider || 'auto', model: single.model || '',
-        raw: rawText, parsed,
-        timestamp: new Date().toISOString(),
-        hyperMode: false,
-      };
-    }
-
-    // Multiple results: synthesize via cross-consultation
-    const combinedRaw = hyperResults.map((r, i) => `[Provider ${i+1}: ${r.provider}/${r.model}]\n${r.text}`).join('\n\n---\n\n');
-
-    // Parse all responses and merge
-    const allParsed = hyperResults.map(r => {
-      try {
-        const jsonMatch = r.text.match(/```(?:json)?\s*([\s\S]*?)```/) || r.text.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
-        return jsonMatch ? JSON.parse(jsonMatch[1] || jsonMatch[0]) : JSON.parse(r.text);
-      } catch { return null; }
-    }).filter(Boolean);
-
-    // Synthesize: merge picks from all providers, deduplicate, boost confidence for agreed picks
-    const merged = mergeHyperResults(allParsed, domain, agent);
-
-    return {
-      agentId: agent.id, agentName: agent.name, layer: agent.layer,
-      domain: agent.domain, weight: agent.weight,
-      provider: hyperResults.map(r => r.provider).join('+'),
-      model: hyperResults.map(r => r.model).join('+'),
-      raw: combinedRaw,
-      parsed: merged,
-      timestamp: new Date().toISOString(),
-      hyperMode: true,
-      hyperProviders: hyperResults.map(r => ({ provider: r.provider, model: r.model })),
-    };
-  }
-
-  // ── Merge multiple provider responses for a single agent ──
-  function mergeHyperResults(parsedList, domain, agent) {
-    if (!parsedList.length) return { error: 'No valid responses' };
-
-    // For sports: merge pick arrays and boost confidence for picks that multiple providers agree on
-    if (domain === 'sports') {
-      const allPicks = [];
-      for (const parsed of parsedList) {
-        const picks = Array.isArray(parsed) ? parsed : (parsed.final_picks || parsed.picks || []);
-        allPicks.push(...picks);
-      }
-
-      // Group picks by game+pick+bet_type
-      const grouped = {};
-      for (const pick of allPicks) {
-        const key = `${(pick.game||'').toLowerCase()}|${(pick.pick||'').toLowerCase()}|${(pick.bet_type||'').toLowerCase()}`;
-        if (!grouped[key]) grouped[key] = [];
-        grouped[key].push(pick);
-      }
-
-      // Picks agreed on by multiple providers get confidence boost
-      const merged = Object.values(grouped).map(group => {
-        const base = group[0];
-        const agreementCount = group.length;
-        const avgConf = group.reduce((s, p) => s + (Number(p.confidence) || 60), 0) / group.length;
-        const boostedConf = Math.min(99, avgConf + (agreementCount - 1) * 8);
-        return {
-          ...base,
-          confidence: Math.round(boostedConf),
-          agents_in_agreement: group.map((_, i) => parsedList[i] ? `Provider ${i+1}` : null).filter(Boolean),
-          hyper_agreement: agreementCount,
-        };
-      });
-
-      // Sort by agreement count then confidence
-      merged.sort((a, b) => (b.hyper_agreement - a.hyper_agreement) || (b.confidence - a.confidence));
-      return merged;
-    }
-
-    // For trading: merge idea arrays
-    const allIdeas = [];
-    for (const parsed of parsedList) {
-      const ideas = parsed.top_ideas || parsed.best_ideas || parsed.quality_screen || [];
-      if (Array.isArray(ideas)) allIdeas.push(...ideas);
-      if (parsed.big_trade) allIdeas.push(parsed.big_trade);
-    }
-
-    // Group by ticker
-    const tickerGroups = {};
-    for (const idea of allIdeas) {
-      const ticker = (idea.ticker || idea.ticker_or_asset || '').toUpperCase();
-      if (!ticker) continue;
-      if (!tickerGroups[ticker]) tickerGroups[ticker] = [];
-      tickerGroups[ticker].push(idea);
-    }
-
-    const mergedIdeas = Object.entries(tickerGroups).map(([ticker, group]) => {
-      const base = group[0];
-      const avgConf = group.reduce((s, p) => s + (Number(p.confidence) || 60), 0) / group.length;
-      return { ...base, ticker, confidence: Math.min(99, Math.round(avgConf + (group.length - 1) * 8)), hyper_agreement: group.length };
-    });
-
-    mergedIdeas.sort((a, b) => (b.hyper_agreement - a.hyper_agreement) || (b.confidence - a.confidence));
-
-    // Return in format compatible with CIO
-    const firstParsed = parsedList[0];
-    return {
-      ...firstParsed,
-      top_ideas: mergedIdeas,
-      best_ideas: mergedIdeas,
-    };
-  }
-
   // ── Build context message for agent ──
   function buildUserMessage(agent, ctx, domain) {
     if (domain === 'trading') return buildTradingContext(agent, ctx);
@@ -272,16 +124,17 @@ ${ctx.marketContext || 'No specific context provided. Use your general knowledge
 ${ctx.priorLayerOutput ? `\n--- PRIOR LAYER ANALYSIS (for your reference) ---\n${JSON.stringify(ctx.priorLayerOutput, null, 2)}\n---` : ''}
 
 ${agent.weight !== 1.0 ? `\nYour current Darwinian trust weight: ${agent.weight.toFixed(2)} / 2.5` : ''}
-${_hyperMode ? '\n[HYPER MODE ACTIVE: Multiple AI models are consulting on this. Be specific and decisive.]' : ''}
 
 Provide your analysis in the specified JSON format. Be specific with tickers, entry prices, targets, and stops. Today is a live trading session.`;
   }
 
+  // ── Sports context: filters game list to this agent's sport ──
   function buildSportsContext(agent, ctx) {
     const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const todayISO = new Date().toISOString().slice(0, 10);
 
-    const agentSport = agent.sport;
+    // If this is a sport specialist, filter the games to only their sport
+    const agentSport = agent.sport; // e.g. "NFL", "NBA", "MLB", "NHL", "MMA" — set in definitions
     let gamesSection = ctx.gamesContext || 'No specific games provided. If you have sport-specific knowledge of upcoming events, apply it.';
 
     if (agentSport && ctx.gamesContext) {
@@ -289,6 +142,7 @@ Provide your analysis in the specified JSON format. Be specific with tickers, en
       if (filtered.trim().length > 20) {
         gamesSection = filtered;
       } else {
+        // No matching games found for this sport
         gamesSection = `NO ${agentSport} GAMES FOUND IN TODAY'S SLATE. Output an empty array [] only.`;
       }
     }
@@ -303,22 +157,21 @@ ${ctx.lineMovements ? `\nLine movements: ${ctx.lineMovements}` : ''}
 
 CRITICAL REMINDERS:
 1. ONLY analyze ${agentSport || 'the sports'} games listed above.
-2. ONLY recommend bets with American odds -200 or higher (e.g., -200, -180, -150, +100, +250 are all valid).
-3. NEVER recommend odds below -200 (e.g., -201, -250, -300 are REJECTED).
-4. ALWAYS include event_date (YYYY-MM-DD) and game_time for every pick.
-5. If no ${agentSport || ''} games are listed above, output an empty JSON array [].
-6. Provide BEST PICKS ONLY — focus on highest confidence, best value bets.
-${_hyperMode ? '7. [HYPER MODE: Be highly specific. Other AI models are also analyzing this. Provide your strongest conviction picks only.]' : ''}
+2. ONLY recommend bets with American odds -200 or higher.
+3. ALWAYS include event_date (YYYY-MM-DD) and game_time for every pick.
+4. If no ${agentSport || ''} games are listed above, output an empty JSON array [].
 ${agent.weight !== 1.0 ? `\nYour current Darwinian trust weight: ${agent.weight.toFixed(2)} / 2.5` : ''}
 
 Provide your picks in the specified JSON format.`;
   }
 
+  // ── Filter games text to only include a specific sport ──
   function filterGamesBySport(gamesText, sport) {
     if (!gamesText || !sport) return gamesText;
     const lines = gamesText.split('\n');
     const sportLower = sport.toLowerCase();
 
+    // Alias map for common sport labels
     const aliases = {
       'nfl': ['nfl', 'football', 'national football'],
       'nba': ['nba', 'basketball', 'national basketball'],
@@ -327,7 +180,16 @@ Provide your picks in the specified JSON format.`;
       'mma': ['mma', 'ufc', 'mixed martial arts', 'boxing'],
     };
     const matchTerms = aliases[sportLower] || [sportLower];
-    const sportHeaderPattern = new RegExp(`\\b(${matchTerms.join('|')})\\b`, 'i');
+
+    // Find sections belonging to this sport
+    // Strategy: look for lines that contain the sport name as a header,
+    // then collect until the next sport header
+    const sportHeaderPattern = new RegExp(
+      `\\b(${matchTerms.join('|')})\\b`,
+      'i'
+    );
+
+    // Detect any known sport header
     const anyHeaderPattern = /^\s*(NFL|NBA|MLB|NHL|MMA|UFC|Soccer|Tennis|Golf|NCAAF|NCAAB)[\s:]/i;
 
     let inSection = false;
@@ -342,8 +204,10 @@ Provide your picks in the specified JSON format.`;
         continue;
       }
       if (inSection) filtered.push(line);
+      // If no headers were found at all, include all lines (user didn't label sports)
     }
 
+    // No labeled sections found — return full text so agent can parse it
     if (!foundSection) return gamesText;
     return filtered.join('\n').trim();
   }
@@ -351,11 +215,12 @@ Provide your picks in the specified JSON format.`;
   // ── Run a full trading debate (all 4 layers) ──
   async function runTradingDebate(ctx, onProgress) {
     const sessionId = Date.now();
-    const results = { sessionId, domain: 'trading', startTime: new Date().toISOString(), layers: {}, finalPicks: [], hyperMode: _hyperMode };
+    const results = { sessionId, domain: 'trading', startTime: new Date().toISOString(), layers: {}, finalPicks: [] };
     const agents = await AgentManager.getAllAgents();
     const tradingAgents = agents.filter(a => a.domain === 'trading' && a.active);
 
-    onProgress?.({ stage: 'layer1', message: `Running macro analysis (5 agents)${_hyperMode ? ' [HYPER MODE]' : ''}...` });
+    // ── Layer 1: Macro ──
+    onProgress?.({ stage: 'layer1', message: 'Running macro analysis (5 agents)...' });
     const macroAgents = tradingAgents.filter(a => a.layer === 1);
     const macroResults = await runLayerParallel(macroAgents, { marketContext: ctx.marketContext }, 'trading');
     results.layers.macro = macroResults;
@@ -363,6 +228,7 @@ Provide your picks in the specified JSON format.`;
     const macroSummary = synthesizeMacro(macroResults);
     onProgress?.({ stage: 'layer1_done', message: `Macro: ${macroSummary.regime} regime, ${macroSummary.riskPosture}`, data: macroResults });
 
+    // ── Layer 2: Sector Specialists ──
     onProgress?.({ stage: 'layer2', message: 'Running sector analysis (7 agents)...' });
     const sectorAgents = tradingAgents.filter(a => a.layer === 2);
     const sectorCtx = { marketContext: ctx.marketContext, priorLayerOutput: macroSummary };
@@ -371,6 +237,7 @@ Provide your picks in the specified JSON format.`;
     const sectorSummary = extractSectorIdeas(sectorResults);
     onProgress?.({ stage: 'layer2_done', message: `Sector: ${sectorSummary.length} ideas identified`, data: sectorResults });
 
+    // ── Layer 3: Superinvestors ──
     onProgress?.({ stage: 'layer3', message: 'Running superinvestor analysis (4 agents)...' });
     const investorAgents = tradingAgents.filter(a => a.layer === 3);
     const investorCtx = {
@@ -381,6 +248,7 @@ Provide your picks in the specified JSON format.`;
     results.layers.superinvestors = investorResults;
     onProgress?.({ stage: 'layer3_done', message: 'Superinvestor theses complete', data: investorResults });
 
+    // ── Layer 4: Decision Layer ──
     onProgress?.({ stage: 'layer4', message: 'Running decision layer (4 agents)...' });
     const decisionAgents = tradingAgents.filter(a => a.layer === 4);
     const allIdeas = [...sectorSummary, ...extractInvestorIdeas(investorResults)];
@@ -411,15 +279,17 @@ Provide your picks in the specified JSON format.`;
     return results;
   }
 
-  // ── Run a full sports debate — returns best 5 picks ──
+  // ── Run a full sports debate ──
   async function runSportsDebate(ctx, onProgress) {
     const sessionId = Date.now();
-    const results = { sessionId, domain: 'sports', startTime: new Date().toISOString(), layers: {}, finalPicks: [], hyperMode: _hyperMode };
+    const results = { sessionId, domain: 'sports', startTime: new Date().toISOString(), layers: {}, finalPicks: [] };
     const agents = await AgentManager.getAllAgents();
     const sportsAgents = agents.filter(a => a.domain === 'sports' && a.active);
 
-    onProgress?.({ stage: 'layer1', message: `Running sport specialists${_hyperMode ? ' [HYPER MODE — all providers consulting]' : ''}...` });
+    // ── Layer 1: Sport Specialists — each gets only their sport's games ──
+    onProgress?.({ stage: 'layer1', message: 'Running sport specialist analysis (NFL, NBA, MLB, NHL, MMA)...' });
     const specialists = sportsAgents.filter(a => a.layer === 1);
+    // Each specialist gets the full context; buildSportsContext will filter by agent.sport
     const specialistResults = await runLayerParallel(
       specialists,
       { gamesContext: ctx.gamesContext, injuryNews: ctx.injuryNews },
@@ -427,9 +297,10 @@ Provide your picks in the specified JSON format.`;
     );
     results.layers.specialists = specialistResults;
     const rawPicks = extractSportsPicks(specialistResults);
-    onProgress?.({ stage: 'layer1_done', message: `Specialists: ${rawPicks.length} raw picks`, data: specialistResults });
+    onProgress?.({ stage: 'layer1_done', message: `Specialists: ${rawPicks.length} raw picks (sport-filtered)`, data: specialistResults });
 
-    onProgress?.({ stage: 'layer2', message: 'Running support analysis...' });
+    // ── Layer 2: Support Analysts (full context — they work across all sports) ──
+    onProgress?.({ stage: 'layer2', message: 'Running support analysis (sharp money, injuries, situations, trends)...' });
     const supportAgents = sportsAgents.filter(a => a.layer === 2);
     const supportCtx = {
       gamesContext: ctx.gamesContext,
@@ -441,6 +312,9 @@ Provide your picks in the specified JSON format.`;
     results.layers.support = supportResults;
     onProgress?.({ stage: 'layer2_done', message: 'Support analysis complete', data: supportResults });
 
+    const consensusBrief = buildConsensusBrief(rawPicks, supportResults);
+
+    // ── Layer 3: Decision ──
     onProgress?.({ stage: 'layer3', message: 'Running value filter, Kelly sizing, and Sports CIO...' });
     const decisionAgents = sportsAgents.filter(a => a.layer === 3);
     const agentWeights = sportsAgents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {});
@@ -449,41 +323,53 @@ Provide your picks in the specified JSON format.`;
       priorLayerOutput: {
         specialistPicks: rawPicks,
         supportAnalysis: extractSupportData(supportResults),
+        consensusBrief,
         agentWeights,
+        consensusMode: LLM.isConsensusMode(),
       },
     };
     const decisionResults = await runLayerSequential(decisionAgents, decisionCtx, 'sports');
     results.layers.decision = decisionResults;
 
+    // Extract final picks with fallback
     const cioResult = decisionResults.find(r => r.agentId === 's_cio');
     const cioPicks = normalizeSportsFinalPicks(cioResult?.parsed?.final_picks || []);
     const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults]);
     const fallbackPicks = buildSportsFallbackPicks(allCandidates, 5, 3);
     const mergedPicks = normalizeSportsFinalPicks([...cioPicks, ...fallbackPicks]);
 
-    // Cap at 5 best picks (sorted by confidence + hyper agreement)
-    const sorted = mergedPicks.sort((a, b) => {
-      const aScore = (Number(a.confidence) || 50) + (Number(a.hyper_agreement) || 1) * 5;
-      const bScore = (Number(b.confidence) || 50) + (Number(b.hyper_agreement) || 1) * 5;
-      return bScore - aScore;
-    });
+    const scheduleData = ctx.scheduleData || {};
+    const consensusRank = new Map((consensusBrief.topAgreements || []).map(a => [
+      dedupeSportsPickKey({ sport: a.sport, game: a.game, bet_type: a.market, pick: a.pick }),
+      a.agreementCount || 0,
+    ]));
+    const rankPick = (pick) => consensusRank.get(dedupeSportsPickKey(pick)) || 0;
+    const rankedPicks = LLM.isConsensusMode()
+      ? [...mergedPicks].sort((a, b) => (rankPick(b) - rankPick(a)) || ((Number(b.confidence) || 0) - (Number(a.confidence) || 0)))
+      : mergedPicks;
 
-    results.finalPicks = sorted.slice(0, 5);
+    const enrichedPicks = enrichFinalSportsPicks(rankedPicks, consensusBrief, scheduleData);
+    const scheduleFiltered = filterUpcomingSportsPicks(enrichedPicks, scheduleData);
+    results.finalPicks = scheduleFiltered.slice(0, 5);
 
     if (results.finalPicks.length < 3 && fallbackPicks.length) {
-      results.finalPicks = normalizeSportsFinalPicks(fallbackPicks).slice(0, 5);
+      results.finalPicks = filterUpcomingSportsPicks(
+        enrichFinalSportsPicks(normalizeSportsFinalPicks(fallbackPicks), consensusBrief, scheduleData),
+        scheduleData
+      ).slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
-      || `${results.finalPicks.length} top picks (odds -200 or better) across ${[...new Set(results.finalPicks.map(p => p.sport).filter(Boolean))].join(', ') || 'multiple sports'}.`;
+      || `${results.finalPicks.length} qualifying picks across ${[...new Set(results.finalPicks.map(p => p.sport).filter(Boolean))].join(', ') || 'multiple sports'}.`;
     results.endTime = new Date().toISOString();
     results.finalPicks = results.finalPicks || [];
     onProgress?.({ stage: 'complete', message: `Session complete — ${results.finalPicks?.length || 0} final picks`, data: results });
     return results;
   }
 
+  // ── Run agents in parallel with staggered starts ──
   async function runLayerParallel(agentList, ctx, domain) {
-    const STAGGER_MS = _hyperMode ? 2000 : 1500; // slightly longer stagger in hyper mode
+    const STAGGER_MS = 1500;
     const promises = agentList.map((agent, i) =>
       new Promise(resolve =>
         setTimeout(() => callAgent(agent, ctx, domain).then(resolve), i * STAGGER_MS)
@@ -492,8 +378,9 @@ Provide your picks in the specified JSON format.`;
     return Promise.all(promises);
   }
 
+  // ── Run agents sequentially (each sees prior output) ──
   async function runLayerSequential(agentList, ctx, domain) {
-    const BETWEEN_MS = _hyperMode ? 3000 : 2000;
+    const BETWEEN_MS = 2000;
     const results = [];
     let runningOutput = ctx.priorLayerOutput || {};
     for (const agent of agentList) {
@@ -510,6 +397,7 @@ Provide your picks in the specified JSON format.`;
   let _onRateLimitCb = null;
   function setRateLimitHandler(fn) { _onRateLimitCb = fn; }
 
+  // ── Synthesis helpers ──
   function synthesizeMacro(macroResults) {
     const regimes = macroResults.map(r => r.parsed?.macro_regime || r.parsed?.global_risk_level).filter(Boolean);
     const postures = macroResults.map(r => r.parsed?.risk_posture || r.parsed?.geopolitical_risk_level).filter(Boolean);
@@ -548,7 +436,10 @@ Provide your picks in the specified JSON format.`;
     const picks = [];
     const seenNodes = new WeakSet();
     for (const r of Array.isArray(resultList) ? resultList : []) {
-      const meta = { agentId: r.agentId, agentName: r.agentName, weight: r.weight, layer: r.layer };
+      const providers = Array.isArray(r.providerOutputs) && r.providerOutputs.length
+        ? r.providerOutputs.map(p => p.provider).filter(Boolean)
+        : (r.provider ? [r.provider] : []);
+      const meta = { agentId: r.agentId, agentName: r.agentName, weight: r.weight, layer: r.layer, providers };
       walkSportsCandidateTree(r.parsed, meta, picks, seenNodes);
       if (r.raw && typeof r.raw === 'string' && r.raw.trim()) {
         walkSportsCandidateTree(r.raw, meta, picks, seenNodes);
@@ -591,8 +482,11 @@ Provide your picks in the specified JSON format.`;
     if (!pick || !game) return null;
     if (!isAllowedSportsOdds(odds)) return null;
 
+    // Preserve and normalize date/time fields
     const eventDate = obj.event_date ?? obj.game_date ?? obj.date ?? obj.original_bet?.event_date ?? '';
     const gameTime = obj.game_time ?? obj.time ?? obj.start_time ?? obj.original_bet?.game_time ?? '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
+    if (!hasSpecificGameTime(gameTime)) return null;
 
     const confidence = normalizeConfidence(
       obj.confidence ?? obj.confidence_pct ?? obj.original_bet?.confidence ?? obj.score
@@ -633,7 +527,7 @@ Provide your picks in the specified JSON format.`;
     return Math.round(pct * 10) / 10;
   }
 
-  function buildSportsFallbackPicks(candidates, target = 5, minimum = 3) {
+  function buildSportsFallbackPicks(candidates, target = 7, minimum = 3) {
     const scored = [];
     const seen = new Set();
     for (const c of Array.isArray(candidates) ? candidates : []) {
@@ -645,8 +539,7 @@ Provide your picks in the specified JSON format.`;
       const conf = Number.isFinite(Number(normalized.confidence)) ? Number(normalized.confidence) : 0;
       const oddsBoost = normalized.odds != null ? Math.max(0, 12 - Math.max(0, Math.abs(Number(normalized.odds)) - 100) / 50) : 0;
       const weightBoost = Number(normalized.source_weight || 1) * 5;
-      const hyperBoost = (normalized.hyper_agreement || 1) * 10;
-      const score = conf + oddsBoost + weightBoost + hyperBoost;
+      const score = conf + oddsBoost + weightBoost;
       scored.push({ pick: normalized, score });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -670,19 +563,28 @@ Provide your picks in the specified JSON format.`;
     const game = raw.game ?? raw.event ?? raw.matchup ?? raw.fight ?? raw.original_bet?.game ?? '';
     if (!pick || !game) return null;
 
+    const eventDate = raw.event_date ?? raw.game_date ?? raw.date ?? raw.original_bet?.event_date ?? '';
+    const gameTime = raw.game_time ?? raw.time ?? raw.start_time ?? raw.original_bet?.game_time ?? '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
+    if (!hasSpecificGameTime(gameTime)) return null;
+
+    if (isIrrelevantBetLabel(pick)) return null;
+
     const normalized = {
       ...raw,
       sport: raw.sport || raw.original_bet?.sport || '',
       game,
-      event_date: raw.event_date ?? raw.game_date ?? raw.date ?? raw.original_bet?.event_date ?? '',
-      game_time: raw.game_time ?? raw.time ?? raw.start_time ?? raw.original_bet?.game_time ?? '',
-      bet_type: raw.bet_type || raw.market || raw.original_bet?.bet_type || 'Moneyline',
+      event_date: eventDate,
+      game_time: gameTime,
+      bet_type: normalizeMarketFamily(raw.bet_type || raw.market || raw.original_bet?.bet_type || 'Moneyline'),
       pick: typeof pick === 'string' ? pick : String(pick),
       odds,
       implied_prob_pct: raw.implied_prob_pct != null ? Number(raw.implied_prob_pct) : calcImpliedProbPct(odds),
       confidence: normalizeConfidence(raw.confidence ?? raw.confidence_pct ?? raw.original_bet?.confidence ?? raw.score),
       agents_in_agreement: raw.agents_in_agreement ?? raw.corroborating_agents ?? [],
       source_agent: raw.source_agent || raw.sourceAgent || raw.agentId || raw.primary_agent_source || 's_cio',
+      source_agent_name: raw.source_agent_name || raw.agentName || raw.primary_agent_name || '',
+      source_providers: Array.isArray(raw.source_providers) ? raw.source_providers : [],
       source_weight: raw.source_weight ?? raw.sourceWeight ?? 1,
     };
     if (normalized.stake_units == null && normalized.units != null) normalized.stake_units = normalized.units;
@@ -691,12 +593,31 @@ Provide your picks in the specified JSON format.`;
     return normalized;
   }
 
+  function normalizeMarketFamily(value) {
+    const raw = String(value || '').toLowerCase();
+    if (!raw) return 'moneyline';
+    if (/money\s*line|\bml\b|h2h|head\s*to\s*head/.test(raw)) return 'moneyline';
+    if (/spread|runline|puckline/.test(raw) && !/total|over|under|ou/.test(raw)) return 'spread';
+    if (/total|over\s*under|\bou\b|o\/u/.test(raw)) return 'total';
+    if (/prop/.test(raw)) return 'prop';
+    return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'moneyline';
+  }
+
+  function normalizePickLabel(pick, family) {
+    const raw = String(pick || '').toLowerCase().trim();
+    const cleaned = raw.replace(/\b(money\s*line|moneyline|\bml\b|spread|total|totals?|over\/?under|ou)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (family === 'moneyline') return cleaned;
+    return cleaned;
+  }
+
   function dedupeSportsPickKey(p) {
+    const family = normalizeMarketFamily(p.bet_type || p.market);
+    const pick = normalizePickLabel(p.pick, family);
     return [
       (p.sport || '').toLowerCase(),
       (p.game || p.event || '').toLowerCase(),
-      (p.bet_type || '').toLowerCase(),
-      (p.pick || '').toLowerCase(),
+      family,
+      pick,
     ].join('|');
   }
 
@@ -715,7 +636,192 @@ Provide your picks in the specified JSON format.`;
   }
 
   function extractSupportData(supportResults) {
-    return supportResults.map(r => ({ agent: r.agentId, data: r.parsed }));
+    return supportResults.map(r => ({ agent: r.agentId, data: r.parsed, providers: r.providerOutputs || [], consensus: !!r.consensus }));
+  }
+
+  function buildConsensusBrief(rawPicks, supportResults, decisionResults = []) {
+    const groups = new Map();
+    for (const pick of Array.isArray(rawPicks) ? rawPicks : []) {
+      const normalized = normalizeSportsPick(pick);
+      if (!normalized) continue;
+      const key = dedupeSportsPickKey(normalized);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          sport: normalized.sport,
+          game: normalized.game,
+          market: normalized.bet_type || normalized.market || 'Moneyline',
+          pick: normalized.pick,
+          odds: normalized.odds,
+          confidence: [],
+          sources: new Set(),
+          sourceAgents: new Set(),
+          llms: new Set(),
+          providerAgents: new Map(),
+        });
+      }
+      const g = groups.get(key);
+      g.confidence.push(Number(normalized.confidence) || 0);
+      if (normalized.source_agent_name) {
+        g.sources.add(normalized.source_agent_name);
+        g.sourceAgents.add(normalized.source_agent_name);
+      }
+      if (normalized.source_agent) {
+        g.sources.add(normalized.source_agent);
+        g.sourceAgents.add(normalized.source_agent);
+      }
+      if (Array.isArray(normalized.source_providers) && normalized.source_providers.length) {
+        for (const provider of normalized.source_providers) {
+          if (!provider) continue;
+          g.llms.add(provider);
+          if (!g.providerAgents.has(provider)) g.providerAgents.set(provider, new Set());
+          const agentLabel = normalized.source_agent_name || normalized.source_agent || '';
+          if (agentLabel) g.providerAgents.get(provider).add(agentLabel);
+        }
+      }
+      if (Array.isArray(normalized.agents_in_agreement)) normalized.agents_in_agreement.forEach(a => g.sources.add(a));
+    }
+
+    const supportNotes = [];
+    for (const r of Array.isArray(supportResults) ? supportResults : []) {
+      const data = r.parsed || {};
+      const buckets = [data.sharp_alerts, data.avoid_public_traps, data.situational_edges, data.injury_impacts, data.trend_bets, data.late_scratch_watch].filter(Array.isArray);
+      for (const bucket of buckets) {
+        for (const item of bucket) {
+          supportNotes.push({
+            agent: r.agentName,
+            sport: item.sport || '',
+            game: item.game || '',
+            note: item.consensus || item.reasoning || item.bet_implication || item.reason || '',
+          });
+        }
+      }
+    }
+
+    const topAgreements = [...groups.values()]
+      .map(g => ({
+        sport: g.sport,
+        game: g.game,
+        market: g.market,
+        pick: g.pick,
+        odds: g.odds,
+        avgConfidence: g.confidence.length ? Math.round(g.confidence.reduce((a, b) => a + b, 0) / g.confidence.length) : 0,
+        sources: [...g.sources].filter(Boolean),
+        agreementCount: new Set([...g.sources].filter(Boolean)).size,
+      }))
+      .sort((a, b) => (b.agreementCount - a.agreementCount) || (b.avgConfidence - a.avgConfidence))
+      .slice(0, 8);
+
+    const pickAgreementMap = {};
+    for (const [key, g] of groups.entries()) {
+      const providerAgents = {};
+      for (const [provider, agents] of g.providerAgents.entries()) {
+        providerAgents[provider] = [...agents].filter(Boolean);
+      }
+      pickAgreementMap[key] = {
+        sport: g.sport,
+        game: g.game,
+        market: g.market,
+        pick: g.pick,
+        odds: g.odds,
+        agent_ids: [...g.sourceAgents].filter(Boolean),
+        agents_in_agreement: [...g.sourceAgents].filter(Boolean),
+        llms: [...g.llms].filter(Boolean),
+        provider_agents: providerAgents,
+        agreementCount: new Set([...g.sourceAgents].filter(Boolean)).size,
+        avgConfidence: g.confidence.length ? Math.round(g.confidence.reduce((a, b) => a + b, 0) / g.confidence.length) : 0,
+      };
+      pickAgreementMap[key].agreement_breakdown = formatAgreementBreakdown(pickAgreementMap[key]);
+    }
+
+    return {
+      topAgreements,
+      supportNotes: supportNotes.slice(0, 10),
+      decisionAgents: Array.isArray(decisionResults) ? decisionResults.map(r => ({ agent: r.agentName, providerCount: r.providerCount || 1, consensus: !!r.consensus })) : [],
+      pickAgreementMap,
+    };
+  }
+
+  function formatAgreementBreakdown(entry = {}) {
+    const providerAgents = entry.provider_agents || {};
+    const parts = Object.entries(providerAgents).map(([provider, agents]) => {
+      const label = String(provider || '').replace(/^consensus\(/, '').replace(/\)$/, '');
+      return `${label || 'provider'} LLM: ${(agents || []).filter(Boolean).join(', ')}`.trim();
+    }).filter(Boolean);
+    return parts.join(' | ');
+  }
+
+  function normalizeScheduleData(scheduleData) {
+    const out = {};
+    for (const [sport, games] of Object.entries(scheduleData || {})) {
+      out[String(sport).toUpperCase()] = Array.isArray(games) ? games : [];
+    }
+    return out;
+  }
+
+  function findMatchingScheduledGame(pick, scheduleData) {
+    const gamesBySport = normalizeScheduleData(scheduleData);
+    const sport = String(pick.sport || '').toUpperCase();
+    const candidates = gamesBySport[sport] || [];
+    const gameText = String(pick.game || '').toLowerCase();
+    const pickTeams = gameText.replace(/\(game\s*\d+\)/ig, '').replace(/\s+/g, ' ').trim();
+    const now = Date.now();
+
+    for (const game of candidates) {
+      const startMs = game.startTime ? Date.parse(game.startTime) : NaN;
+      const gameStatus = String(game.statusState || '').toLowerCase();
+      const validTime = hasSpecificGameTime(game.time);
+      if (!Number.isFinite(startMs) || startMs <= now) continue;
+      if (gameStatus && gameStatus !== 'pre') continue;
+      if (!validTime) continue;
+      const away = String(game.awayTeam || '').toLowerCase();
+      const home = String(game.homeTeam || '').toLowerCase();
+      if (!away || !home) continue;
+      const matchesAwayHome = pickTeams.includes(away) && pickTeams.includes(home);
+      const matchesHomeAway = pickTeams.includes(home) && pickTeams.includes(away);
+      if (matchesAwayHome || matchesHomeAway) return game;
+    }
+    return null;
+  }
+
+  function enrichFinalSportsPicks(picks, consensusBrief, scheduleData) {
+    const out = [];
+    for (const pick of Array.isArray(picks) ? picks : []) {
+      const normalized = normalizeSportsPick(pick);
+      if (!normalized) continue;
+      const key = dedupeSportsPickKey(normalized);
+      const agreement = consensusBrief?.pickAgreementMap?.[key] || {};
+      const scheduled = findMatchingScheduledGame(normalized, scheduleData);
+      const finalPick = {
+        ...normalized,
+        game_time: scheduled?.time || normalized.game_time,
+        agents_in_agreement: agreement.agents_in_agreement || normalized.agents_in_agreement || [],
+        agreement_agent_ids: agreement.agent_ids || [],
+        agreement_llms: agreement.llms || [],
+        agreement_breakdown: agreement.agreement_breakdown || '',
+        agreement_count: agreement.agreementCount || 0,
+      };
+      out.push(finalPick);
+    }
+    return out;
+  }
+
+  function filterUpcomingSportsPicks(picks, scheduleData) {
+    const out = [];
+    const seen = new Set();
+    const hasSchedule = Object.values(normalizeScheduleData(scheduleData)).some(arr => Array.isArray(arr) && arr.length);
+    for (const pick of Array.isArray(picks) ? picks : []) {
+      const key = dedupeSportsPickKey(pick);
+      if (seen.has(key)) continue;
+      const scheduled = hasSchedule ? findMatchingScheduledGame(pick, scheduleData) : null;
+      if (hasSchedule && !scheduled) continue;
+      const enriched = {
+        ...pick,
+        game_time: scheduled?.time || pick.game_time,
+      };
+      seen.add(key);
+      out.push(enriched);
+    }
+    return out;
   }
 
   function mode(arr) {
@@ -742,7 +848,5 @@ Provide your picks in the specified JSON format.`;
     runSportsDebate,
     callAgent,
     setRateLimitHandler,
-    setHyperMode,
-    isHyperMode,
   };
 })();
