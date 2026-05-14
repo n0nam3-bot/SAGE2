@@ -8,7 +8,6 @@ const UI = (() => {
   function renderAll() {
     renderNav();
     renderAgents();
-    renderPerformance();
     renderRegimePanel();
   }
 
@@ -75,8 +74,8 @@ const UI = (() => {
         <h2>🧠 Agent Performance</h2>
         <div class="agent-header-actions">
           <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
-          <button class="btn-sm" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
-          <button class="btn-sm" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
+          <button class="btn-sm" onclick="SAGE.runFixWeakestAgent('all')">🛠️ Fix Weakest Agent</button>
+          <button class="btn-sm" onclick="SAGE.runBlindSpotDetection('all')">🔍 Blind Spot Scan</button>
         </div>
       </div>
       ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
@@ -459,7 +458,7 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
         <span class="conf-val" style="color:${confColor}">${conf}/100</span>
       </div>
       ${reasoning ? `<div class="pick-reasoning">${reasoningShort}</div>` : ''}
-      ${agents.length > 0 ? `<div class="agents-agree">🤝 ${agents.slice(0,3).join(', ')}${agents.length > 3 ? ` +${agents.length-3}` : ''}</div>` : ''}
+      ${(pick.agreement_count || agents.length) > 1 ? `<div class="agents-agree agree-strong">🤝 ${pick.agreement_breakdown || agents.slice(0,3).join(', ')}${agents.length > 3 ? ` +${agents.length-3}` : ''}</div>` : (agents.length > 0 ? `<div class="agents-agree">🤝 ${agents.slice(0,3).join(', ')}${agents.length > 3 ? ` +${agents.length-3}` : ''}</div>` : '')}
       <div class="pick-actions">
         <button class="btn-sm win-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',true)">✅ Win</button>
         <button class="btn-sm loss-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',false)">❌ Loss</button>
@@ -738,17 +737,19 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
       || !!Profile?.getSheetsToken?.()
       || !!SheetsClient?.getAppsScriptUrl?.();
 
-    const consensusOn = LLM.isConsensusMode?.();
+    const hyperOn = LLM.isHyperMode?.();
+    const hyperBtn = document.getElementById('hyper-toggle-btn');
+    if (hyperBtn) hyperBtn.classList.toggle('hyper-on', !!hyperOn);
     const keys = Auth?.getKeys?.() || {};
     const activeProviders = ['gemini','groq','openrouter'].filter(p => !!keys[p]);
 
     el.innerHTML = `
       <span class="status-item ok">${LLM.activeProviderLabel()}</span>
-      ${activeProviders.length > 1 ? `
-        <span class="status-item ${consensusOn ? 'ok' : ''}" style="cursor:pointer"
-          onclick="LLM.setConsensusMode(!LLM.isConsensusMode()); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isConsensusMode() ? 'Consensus mode ON — all providers vote on each agent 🤝' : 'Consensus mode OFF', 'info');"
-          title="Click to toggle multi-LLM consensus mode">
-          ${consensusOn ? '🤝 Consensus ON' : '⚡ Single LLM'} (${activeProviders.length} keys)
+      ${activeProviders.length > 0 ? `
+        <span class="status-item" style="cursor:pointer"
+          onclick="LLM.toggleHyperMode(); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isHyperMode() ? 'Hyper mode ON — all providers and models vote together' : 'Hyper mode OFF', 'info');"
+          title="Toggle hyper mode">
+          ⚡ Hyper (${activeProviders.length} keys)
         </span>` : ''}
       <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal?.()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
