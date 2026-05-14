@@ -14,6 +14,42 @@ const DebateEngine = (() => {
     return n >= -200;
   }
 
+  function normalizeName(str) {
+    return String(str || '')
+      .toLowerCase()
+      .replace(/\(.*?\)/g, ' ')
+      .replace(/game\s*\d+/gi, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function extractGameTeams(gameText) {
+    const cleaned = String(gameText || '')
+      .replace(/\(.*?\)/g, ' ')
+      .replace(/game\s*\d+/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const parts = cleaned.split(/\s+(?:@|vs\.?|v\.?|at)\s+/i).map(s => s.trim()).filter(Boolean);
+    return parts.length >= 2 ? parts.slice(0, 2) : [];
+  }
+
+  function buildGameKey(a, b) {
+    const teams = [normalizeName(a), normalizeName(b)].filter(Boolean).sort();
+    return teams.join('|');
+  }
+
+  function buildGameKeyFromText(gameText) {
+    const teams = extractGameTeams(gameText);
+    if (teams.length >= 2) return buildGameKey(teams[0], teams[1]);
+    return normalizeName(gameText);
+  }
+
+  function assertForeground() {
+    const active = typeof window === 'undefined' || !window.SAGE?.isForeground ? true : window.SAGE.isForeground();
+    if (!active) throw new Error('Session paused because the tab is not active.');
+  }
+
   // ── Call LLM for a single agent ──
   async function callAgent(agent, contextData, domain) {
     const systemPrompt = agent.shadowMode ? agent.shadowMode.newPrompt : agent.prompt;
@@ -23,6 +59,7 @@ const DebateEngine = (() => {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
+        assertForeground();
         const chatFn = LLM.isConsensusMode() ? LLM.chatMultiProvider : LLM.chat;
         const result = await chatFn({
           system: systemPrompt,
@@ -314,10 +351,11 @@ Provide your picks in the specified JSON format.`;
     const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults]);
     const fallbackPicks = buildSportsFallbackPicks(allCandidates, 5, 3);
     const mergedPicks = normalizeSportsFinalPicks([...cioPicks, ...fallbackPicks]);
-    results.finalPicks = mergedPicks.slice(0, 5);
+    const scheduleSafePicks = applyScheduleMetadata(mergedPicks, ctx.scheduleIndex || []);
+    results.finalPicks = scheduleSafePicks.slice(0, 5);
 
     if (results.finalPicks.length < 3 && fallbackPicks.length) {
-      results.finalPicks = normalizeSportsFinalPicks(fallbackPicks).slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
+      results.finalPicks = applyScheduleMetadata(normalizeSportsFinalPicks(fallbackPicks), ctx.scheduleIndex || []).slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
@@ -332,8 +370,15 @@ Provide your picks in the specified JSON format.`;
   async function runLayerParallel(agentList, ctx, domain) {
     const STAGGER_MS = 1500;
     const promises = agentList.map((agent, i) =>
-      new Promise(resolve =>
-        setTimeout(() => callAgent(agent, ctx, domain).then(resolve), i * STAGGER_MS)
+      new Promise((resolve, reject) =>
+        setTimeout(() => {
+          try {
+            assertForeground();
+            callAgent(agent, ctx, domain).then(resolve).catch(reject);
+          } catch (err) {
+            reject(err);
+          }
+        }, i * STAGGER_MS)
       )
     );
     return Promise.all(promises);
@@ -345,6 +390,7 @@ Provide your picks in the specified JSON format.`;
     const results = [];
     let runningOutput = ctx.priorLayerOutput || {};
     for (const agent of agentList) {
+      assertForeground();
       const result = await callAgent(agent, { ...ctx, priorLayerOutput: runningOutput }, domain);
       results.push(result);
       runningOutput = { ...runningOutput, [`${agent.id}`]: result.parsed };
@@ -580,6 +626,43 @@ Provide your picks in the specified JSON format.`;
       out.push(pick);
     }
     return out;
+  }
+
+  function applyScheduleMetadata(picks, scheduleIndex = []) {
+    const now = Date.now();
+    const schedules = Array.isArray(scheduleIndex) ? scheduleIndex.map(entry => ({
+      ...entry,
+      matchKey: entry.matchKey || buildGameKeyFromText(entry.game || `${entry.awayTeam || ''} @ ${entry.homeTeam || ''}`),
+    })) : [];
+
+    const findScheduleMatch = (pick) => {
+      const key = buildGameKeyFromText(pick.game || '');
+      const teams = extractGameTeams(pick.game || '');
+      return schedules.find(s =>
+        s.matchKey === key ||
+        (s.sport || '').toLowerCase() === String(pick.sport || '').toLowerCase() && normalizeName(s.game || '') === normalizeName(pick.game || '')
+      );
+    };
+
+    return (Array.isArray(picks) ? picks : []).map(raw => {
+      const pick = normalizeSportsPick(raw);
+      if (!pick) return null;
+      const match = findScheduleMatch(pick);
+      if (match) {
+        const startMs = Date.parse(match.startTime || match.commenceTime || '');
+        if ((match.statusState && match.statusState !== 'pre') || (Number.isFinite(startMs) && startMs <= (now + 10 * 60 * 1000))) {
+          return null;
+        }
+        return {
+          ...pick,
+          event_date: match.event_date || pick.event_date,
+          game_time: match.game_time || pick.game_time,
+          schedule_status: match.statusState || 'pre',
+          schedule_start_time: match.startTime || match.commenceTime || '',
+        };
+      }
+      return pick;
+    }).filter(Boolean);
   }
 
   function extractSupportData(supportResults) {
