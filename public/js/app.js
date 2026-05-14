@@ -26,6 +26,25 @@ const SAGE = (() => {
     return false;
   }
 
+  function hasSheetsSync() {
+    const token = !!Profile.getSheetsToken?.();
+    const scriptUrl = !!globalThis.SheetsClient?.getAppsScriptUrl?.();
+    const authorized = token || scriptUrl;
+    state.sheetsStatus = {
+      ...(state.sheetsStatus || {}),
+      authorized,
+      sheetsAuthorized: token,
+      appsScriptConfigured: scriptUrl,
+    };
+    window._sageState = state;
+    return authorized;
+  }
+
+  function refreshSheetsStatusUi() {
+    window._sageState = state;
+    UI.updateStatus?.(state);
+  }
+
   function setActiveTab(tab) {
     state.activeTab = tab;
     window._sageState = state;
@@ -137,7 +156,7 @@ const SAGE = (() => {
 
   async function syncResolvedSportsPicks() {
     if (!state.initialized || !isForeground()) return;
-    if (!state.sheetsStatus?.authorized && !Profile.getSheetsToken?.()) return;
+    if (!hasSheetsSync()) return;
     const picks = await DB.getAllPicks();
     const unresolved = picks.filter(p => p.domain === 'sports' && !p.outcomeDate && p.event_date && p.game && p.pick);
     if (!unresolved.length) return;
@@ -167,7 +186,7 @@ const SAGE = (() => {
     if (updated > 0) {
       UI.renderPerformance();
       UI.renderAgents();
-      if (state.sheetsStatus?.authorized) {
+      if (hasSheetsSync()) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
       }
@@ -301,7 +320,7 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (state.sheetsStatus?.authorized) {
+      if (hasSheetsSync()) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.logTradingSession?.(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'trading'));
@@ -369,7 +388,7 @@ const SAGE = (() => {
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (state.sheetsStatus?.authorized) {
+      if (hasSheetsSync()) {
         await globalThis.SheetsClient?.logSportsSession?.(result);
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
@@ -476,7 +495,7 @@ Spawn a new specialist agent?`);
       await AgentManager.recordOutcome(agentId, pick.domain, correct, returnPct);
     }
 
-    if (pick.domain === 'sports' && state.sheetsStatus?.authorized) {
+    if (pick.domain === 'sports' && hasSheetsSync()) {
       const allPicks = await DB.getAllPicks();
       const runningRoi = computeRunningRoi(allPicks);
       await globalThis.SheetsClient?.markSportsOutcome?.({
@@ -491,7 +510,7 @@ Spawn a new specialist agent?`);
 
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (state.sheetsStatus?.authorized) {
+    if (hasSheetsSync()) {
       await globalThis.SheetsClient?.syncAgentPerformance?.(agents);
     }
     UI.renderPerformance();
@@ -530,14 +549,17 @@ Spawn a new specialist agent?`);
     updateSheetsStatus: async () => {
       if (LLM.IS_LOCAL) {
         state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+        refreshSheetsStatusUi();
       } else {
         const _scriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
         state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
       }
-      UI.updateStatus(state);
+      refreshSheetsStatusUi();
     },
   };
 })();
+
+globalThis.SAGE = SAGE;
 
 // ── App boots only after successful login (called from profile.js) ──
 // See: Profile.doLogin() and Profile.doRegister() in profile.js
