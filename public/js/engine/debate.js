@@ -540,12 +540,45 @@ Provide your picks in the specified JSON format.`;
     return normalized;
   }
 
+  function normalizeSportsText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/&/g, ' and ')
+      .replace(/[^a-z0-9\s.+-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function normalizeSportsMarket(value) {
+    const text = normalizeSportsText(value);
+    if (!text) return '';
+    if (/(money\s*line|\bml\b)/.test(text)) return 'moneyline';
+    if (/(spread|run line|puck line|handicap|\bats\b|\bpts\b)/.test(text)) return 'spread';
+    if (/(over|under|o\/u|\btotal\b)/.test(text)) return 'total';
+    if (/(prop|player prop|proposition)/.test(text)) return 'prop';
+    return text;
+  }
+
+  function normalizeSportsSelection(value, market = '') {
+    let text = normalizeSportsText(value);
+    if (!text) return '';
+    text = text
+      .replace(/\b(money\s*line|moneyline|\bml\b)\b/g, '')
+      .replace(/\b(over|under|o\/u|\btotal\b|\bspread\b|run line|puck line)\b/g, '')
+      .replace(/\b(points?|pts?)\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text || normalizeSportsText(value) || normalizeSportsMarket(market);
+  }
+
   function dedupeSportsPickKey(p) {
+    const market = normalizeSportsMarket(p.bet_type || p.market || p.type || '');
+    const selection = normalizeSportsSelection(p.pick || p.selection || p.recommended_bet || '', market);
     return [
-      (p.sport || '').toLowerCase(),
-      (p.game || p.event || '').toLowerCase(),
-      (p.bet_type || '').toLowerCase(),
-      (p.pick || '').toLowerCase(),
+      normalizeSportsText(p.sport || ''),
+      normalizeSportsText(p.game || p.event || ''),
+      market,
+      selection,
     ].join('|');
   }
 
