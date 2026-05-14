@@ -119,6 +119,21 @@ async function appendViaBearerToken({ token, sheetId, tab, rows }) {
   return true;
 }
 
+async function clearAndWriteViaBearerToken({ token, sheetId, tab, rows }) {
+  const clearRange = encodeURIComponent(`'${tab}'!A2:Z`);
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${clearRange}:clear`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+  });
+  if (!rows?.length) return;
+  const range = encodeURIComponent(`'${tab}'!A2`);
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: rows }),
+  });
+}
+
 async function ensureSheets(sheets) {
   const required = ['Trading Picks', 'Sports Picks', 'Agent Performance', 'Equity Curve'];
   try {
@@ -193,6 +208,26 @@ app.post('/api/sheets/append', async (req, res) => {
     await ensureSheets(sheets);
     await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: `'${tab}'!A1`, valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS', resource: { values: rows } });
     res.json({ success: true, rowsAdded: rows.length, mode: 'server' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/sheets/overwrite', async (req, res) => {
+  const { tab, rows, token, sheetId } = req.body;
+  if (!tab) return res.status(400).json({ error: 'tab required' });
+  try {
+    if (token && sheetId) {
+      await ensureSheetsDirect(token, sheetId).catch(() => {});
+      await clearAndWriteViaBearerToken({ token, sheetId, tab, rows: rows || [] });
+      return res.json({ success: true, rowsAdded: (rows || []).length, mode: 'direct' });
+    }
+    const sheets = await getSheetsClient();
+    if (!sheets) return res.status(401).json({ error: 'Not authorized with Google Sheets' });
+    await ensureSheets(sheets);
+    await sheets.spreadsheets.values.clear({ spreadsheetId: SHEET_ID, range: `'${tab}'!A2:Z` }).catch(() => {});
+    if (rows?.length) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `'${tab}'!A2`, valueInputOption: 'USER_ENTERED', resource: { values: rows } });
+    }
+    res.json({ success: true, rowsAdded: (rows || []).length, mode: 'server' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
