@@ -1,5 +1,6 @@
 // data-feeds.js — Autonomous data fetching from free, no-auth sources
 // Sources: ESPN (no key), Reddit (no key), The Odds API (free key), RSS2JSON (no key), FRED (free key)
+// Date mode: single day only
 
 const DataFeeds = (() => {
 
@@ -10,7 +11,6 @@ const DataFeeds = (() => {
   const FRED    = 'https://api.stlouisfed.org/fred';
   const ALLORI  = 'https://api.allorigins.win/get?url=';
 
-  // ── Safe fetch with timeout ──
   async function sf(url, timeout = 7000) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeout);
@@ -21,71 +21,26 @@ const DataFeeds = (() => {
       return res.json();
     } catch (e) {
       clearTimeout(t);
-      return null; // silent fail — feeds are best-effort
+      return null;
     }
   }
 
-  const ODDS_CACHE_KEY = 'sage_odds_cache_v2';
-  const ODDS_CACHE_TTL_MS = 30 * 60 * 1000;
-
-  function readOddsCache() {
-    try { const raw = localStorage.getItem(ODDS_CACHE_KEY); if (!raw) return null; const parsed = JSON.parse(raw); return parsed && typeof parsed === 'object' ? parsed : null; } catch { return null; }
-  }
-  function writeOddsCache(snapshot) { try { localStorage.setItem(ODDS_CACHE_KEY, JSON.stringify(snapshot)); } catch {} }
-  function isFreshTimestamp(iso, maxAgeMs = ODDS_CACHE_TTL_MS) { if (!iso) return false; const ts = Date.parse(iso); return Number.isFinite(ts) && (Date.now() - ts) < maxAgeMs; }
-  function normalizeOddPrice(price) { if (price == null || price === '') return null; const n = Number(String(price).replace(/[^\d+\-]/g, '')); return Number.isFinite(n) ? n : null; }
-
-
-  function buildSportsDateLabel(pickedDate, mode) {
+  function buildSportsDateLabel(pickedDate) {
     const d = new Date(`${pickedDate}T00:00:00`);
     if (Number.isNaN(d.getTime())) return 'Today';
-    if (mode === 'week') {
-      const start = startOfWeekSunday(d);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 6);
-      return `Week of ${start.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
-    }
     return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
   }
 
-  function startOfWeekSunday(date) {
-    const d = new Date(date);
-    const day = d.getDay();
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - day);
-    return d;
-  }
-
-  function buildDateRange(pickedDate, mode) {
+  // Build date range for odds API (single day: start to next day)
+  function buildDateRange(pickedDate) {
     const base = new Date(`${pickedDate}T00:00:00`);
     if (Number.isNaN(base.getTime())) return {};
-    let start = base;
-    let end = new Date(base);
-    if (mode === 'week') {
-      start = startOfWeekSunday(base);
-      end = new Date(start);
-      end.setDate(end.getDate() + 7);
-    } else {
-      end.setDate(end.getDate() + 1);
-    }
-    return { from: start.toISOString(), to: end.toISOString() };
+    const end = new Date(base);
+    end.setDate(end.getDate() + 1);
+    return { from: base.toISOString(), to: end.toISOString() };
   }
 
-  function getSportsDateList(pickedDate, mode) {
-    const base = new Date(`${pickedDate}T00:00:00`);
-    if (Number.isNaN(base.getTime())) return [new Date().toISOString().slice(0, 10)];
-    if (mode === 'week') {
-      const start = startOfWeekSunday(base);
-      return Array.from({ length: 7 }, (_, i) => {
-        const d = new Date(start);
-        d.setDate(start.getDate() + i);
-        return d.toISOString().slice(0, 10);
-      });
-    }
-    return [base.toISOString().slice(0, 10)];
-  }
-
-  // ── ESPN: Schedule for a sport on a specific date (YYYY-MM-DD optional) ──
+  // ── ESPN: Schedule for a sport on a specific date ──
   async function getESPNGames(sport, league, date = null) {
     const datePart = date ? `?dates=${String(date).replace(/-/g, '')}` : '';
     const d = await sf(`${ESPN}/${sport}/${league}/scoreboard${datePart}`);
@@ -94,13 +49,7 @@ const DataFeeds = (() => {
       const comps = e.competitions?.[0];
       const home = comps?.competitors?.find(c => c.homeAway === 'home');
       const away = comps?.competitors?.find(c => c.homeAway === 'away');
-      const start = new Date(e.date);
-      const state = String(e.status?.type?.state || '').toLowerCase();
-      const detail = e.status?.type?.detail || e.status?.type?.shortDetail || e.status?.type?.description || '';
-      const time = Number.isFinite(start.getTime())
-        ? start.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' })
-        : '';
-      const hasScheduledTime = !!time && !/tbd|tba|postponed|delayed/i.test(time);
+      const time = new Date(e.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
       return {
         name: e.name,
         shortName: e.shortName,
@@ -110,62 +59,51 @@ const DataFeeds = (() => {
         homeRecord: home?.records?.[0]?.summary || '',
         awayScore: away?.score,
         homeScore: home?.score,
-        status: detail,
-        statusState: state,
-        isLive: state !== 'pre',
-        hasScheduledTime,
-        startTime: Number.isFinite(start.getTime()) ? start.toISOString() : '',
-        time: detail && state !== 'pre' ? detail : time,
+        status: e.status?.type?.description || '',
+        time,
         venue: comps?.venue?.fullName || '',
+        eventDate: pickedDate => pickedDate || e.date?.slice(0, 10) || '',
       };
     });
   }
 
-  // ── ESPN: Team news / injuries ──
   async function getESPNNews(sport, league) {
     const d = await sf(`${ESPN}/${sport}/${league}/news?limit=12`);
     if (!d?.articles?.length) return [];
     return d.articles.map(a => ({ headline: a.headline, description: a.description?.slice(0, 200) || '' }));
   }
 
-  // ── The Odds API: Real moneylines, spreads, totals ──
-  async function getLiveOdds(sportKey, apiKey, range = {}, options = {}) {
-    const cacheKey = `${sportKey}|${range?.from || ''}|${range?.to || ''}`;
-    const cached = readOddsCache();
-    const cachedEntry = cached?.sports?.[cacheKey];
-
-    if (cachedEntry && isFreshTimestamp(cachedEntry.fetchedAt)) {
-      return { rows: cachedEntry.rows || [], fetchedAt: cachedEntry.fetchedAt, fromCache: true };
-    }
-    if (options.useCacheOnly) {
-      return cachedEntry ? { rows: cachedEntry.rows || [], fetchedAt: cachedEntry.fetchedAt, fromCache: true } : null;
-    }
-    if (!apiKey) {
-      return cachedEntry ? { rows: cachedEntry.rows || [], fetchedAt: cachedEntry.fetchedAt, fromCache: true } : null;
-    }
-
-    const params = new URLSearchParams({ apiKey, regions: 'us', markets: 'h2h,spreads,totals', oddsFormat: 'american', dateFormat: 'iso' });
+  async function getLiveOdds(sportKey, apiKey, range = {}) {
+    if (!apiKey) return null;
+    const params = new URLSearchParams({
+      apiKey,
+      regions: 'us',
+      markets: 'h2h,spreads,totals',
+      oddsFormat: 'american',
+      dateFormat: 'iso',
+    });
     if (range?.from) params.set('commenceTimeFrom', range.from);
     if (range?.to) params.set('commenceTimeTo', range.to);
     const d = await sf(`${ODDS}/sports/${sportKey}/odds/?${params.toString()}`);
-    if (!Array.isArray(d)) {
-      return cachedEntry ? { rows: cachedEntry.rows || [], fetchedAt: cachedEntry.fetchedAt, fromCache: true } : null;
-    }
-
-    const rows = d.map(game => {
+    if (!Array.isArray(d)) return null;
+    return d.map(game => {
       const bm = game.bookmakers?.[0];
       if (!bm) return null;
-      const h2h = bm.markets?.find(m => m.key === 'h2h');
+      const h2h     = bm.markets?.find(m => m.key === 'h2h');
       const spreads = bm.markets?.find(m => m.key === 'spreads');
-      const totals = bm.markets?.find(m => m.key === 'totals');
-      const homeML = normalizeOddPrice(h2h?.outcomes?.find(o => o.name === game.home_team)?.price);
-      const awayML = normalizeOddPrice(h2h?.outcomes?.find(o => o.name === game.away_team)?.price);
+      const totals  = bm.markets?.find(m => m.key === 'totals');
+      const homeML  = h2h?.outcomes?.find(o => o.name === game.home_team)?.price;
+      const awayML  = h2h?.outcomes?.find(o => o.name === game.away_team)?.price;
       const homeSpread = spreads?.outcomes?.find(o => o.name === game.home_team);
-      const total = totals?.outcomes?.[0]?.point != null ? Number(totals.outcomes[0].point) : null;
+      const total   = totals?.outcomes?.[0]?.point;
+      const commenceTime = game.commence_time;
+      const gameDate = commenceTime ? commenceTime.slice(0, 10) : '';
+      const gameTime = commenceTime ? new Date(commenceTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }) : '';
       return {
-        home: game.home_team,
-        away: game.away_team,
-        commenceTime: game.commence_time,
+        home: game.home_team, away: game.away_team,
+        commenceTime,
+        gameDate,
+        gameTime,
         homeML: homeML != null ? (homeML > 0 ? `+${homeML}` : `${homeML}`) : null,
         awayML: awayML != null ? (awayML > 0 ? `+${awayML}` : `${awayML}`) : null,
         spread: homeSpread ? `${game.home_team} ${homeSpread.point > 0 ? '+' : ''}${homeSpread.point}` : null,
@@ -173,22 +111,8 @@ const DataFeeds = (() => {
         book: bm.title,
       };
     }).filter(Boolean);
-
-    const fetchedAt = new Date().toISOString();
-    const nextCache = cached && typeof cached === 'object' ? cached : { sports: {} };
-    nextCache.fetchedAt = fetchedAt;
-    nextCache.sports = nextCache.sports || {};
-    nextCache.sports[cacheKey] = { fetchedAt, rows };
-    writeOddsCache(nextCache);
-
-    if (options.persistFreshOdds && typeof SheetsClient !== 'undefined' && SheetsClient.logFreshOddsSnapshot) {
-      SheetsClient.logFreshOddsSnapshot({ sportKey, sportName: options.sportName || sportKey, fetchedAt, rows, range }).catch(() => {});
-    }
-
-    return { rows, fetchedAt, fromCache: false };
   }
 
-  // ── Reddit: Hot posts from subreddit ──
   async function getRedditPosts(sub, limit = 12) {
     const d = await sf(`${REDDIT}/r/${sub}/hot.json?limit=${limit}&raw_json=1`);
     if (!d?.data?.children?.length) return [];
@@ -203,7 +127,6 @@ const DataFeeds = (() => {
       }));
   }
 
-  // ── RSS via rss2json.com ──
   async function getRSS(feedUrl, count = 8) {
     const d = await sf(`${RSS2J}${encodeURIComponent(feedUrl)}&count=${count}`);
     if (!d?.items?.length) return [];
@@ -214,7 +137,6 @@ const DataFeeds = (() => {
     }));
   }
 
-  // ── Yahoo Finance snapshot (via allorigins proxy) ──
   async function getYahooQuote(symbol) {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`;
     const d = await sf(`${ALLORI}${encodeURIComponent(url)}`);
@@ -231,7 +153,6 @@ const DataFeeds = (() => {
     } catch { return null; }
   }
 
-  // ── FRED: Latest value of an economic series ──
   async function getFRED(seriesId, apiKey) {
     if (!apiKey) return null;
     const d = await sf(`${FRED}/series/observations?series_id=${seriesId}&api_key=${apiKey}&sort_order=desc&limit=2&file_type=json`);
@@ -239,13 +160,12 @@ const DataFeeds = (() => {
   }
 
   // ═══════════════════════════════════════════════
-  // BUILD TRADING CONTEXT — auto-assembled
+  // BUILD TRADING CONTEXT
   // ═══════════════════════════════════════════════
   async function buildTradingContext(keys = {}, userNotes = '') {
     const lines = [`Auto-fetched market data — ${new Date().toLocaleString()}\n`];
     const fetched = [];
 
-    // ── Market indices (Yahoo Finance) ──
     const indices = [
       { sym: '%5EGSPC', name: 'S&P 500' },
       { sym: '%5ENDX', name: 'NASDAQ 100' },
@@ -263,7 +183,6 @@ const DataFeeds = (() => {
       fetched.push('Market indices');
     }
 
-    // ── FRED economic data ──
     if (keys.fred_key) {
       const [fedFunds, cpi, unemployment, dxy] = await Promise.all([
         getFRED('FEDFUNDS', keys.fred_key),
@@ -281,12 +200,10 @@ const DataFeeds = (() => {
       }
     }
 
-    // ── Financial news RSS ──
     const newsFeeds = [
       { url: 'https://feeds.marketwatch.com/marketwatch/topstories/', name: 'MarketWatch' },
-      { url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html', name: 'CNBC Markets' },
       { url: 'https://feeds.reuters.com/reuters/businessNews', name: 'Reuters Business' },
-      { url: 'https://feeds.bloomberg.com/markets/news.rss', name: 'Bloomberg Markets' },
+      { url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html', name: 'CNBC Markets' },
     ];
     for (const { url, name } of newsFeeds) {
       const items = await getRSS(url, 6);
@@ -294,11 +211,10 @@ const DataFeeds = (() => {
         lines.push(`\n=== ${name} ===`);
         items.slice(0, 5).forEach(i => lines.push(`• ${i.title}${i.summary ? ': ' + i.summary : ''}`));
         fetched.push(name);
-        break; // one news feed is enough to avoid rate limits
+        break;
       }
     }
 
-    // ── Reddit sentiment ──
     const wsbPosts = await getRedditPosts('wallstreetbets', 10);
     if (wsbPosts.length) {
       lines.push('\n=== r/wallstreetbets (hot) ===');
@@ -313,14 +229,6 @@ const DataFeeds = (() => {
       fetched.push('r/stocks');
     }
 
-    const investingPosts = await getRedditPosts('investing', 6);
-    if (investingPosts.length) {
-      lines.push('\n=== r/investing (hot) ===');
-      investingPosts.slice(0, 4).forEach(p => lines.push(`[${p.score}↑] ${p.title}`));
-      fetched.push('r/investing');
-    }
-
-    // ── User's additional notes ──
     if (userNotes?.trim()) {
       lines.push(`\n=== ADDITIONAL CONTEXT FROM USER ===\n${userNotes.trim()}`);
     }
@@ -333,41 +241,23 @@ const DataFeeds = (() => {
   }
 
   // ═══════════════════════════════════════════════
-  // BUILD SPORTS CONTEXT — auto-assembled
+  // BUILD SPORTS CONTEXT — single date only
   // ═══════════════════════════════════════════════
   async function buildSportsContext(keys = {}, userNotes = '', options = {}) {
     const pickedDate = options.date || new Date().toISOString().slice(0, 10);
-    const dateMode = options.mode === 'week' ? 'week' : 'day';
-    const dateLabel = buildSportsDateLabel(pickedDate, dateMode);
-    const range = buildDateRange(pickedDate, dateMode);
-    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nSelected range: ${dateLabel}\n`];
+    const dateLabel = buildSportsDateLabel(pickedDate);
+    const range = buildDateRange(pickedDate);
+    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nSelected date: ${dateLabel}\n`];
     const fetched = [];
     const oddsKey = keys.odds_api_key;
 
-    // ── ESPN schedules — selected date or week ──
-    const dateList = getSportsDateList(pickedDate, dateMode);
-    const daySnapshots = await Promise.all(dateList.map(async day => ({
-      day,
-      nfl: await getESPNGames('football', 'nfl', day),
-      nba: await getESPNGames('basketball', 'nba', day),
-      mlb: await getESPNGames('baseball', 'mlb', day),
-      nhl: await getESPNGames('hockey', 'nhl', day),
-    })));
-
-    const uniqueBy = (items, keyFn) => {
-      const seen = new Set();
-      return items.filter(item => {
-        const key = keyFn(item);
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    };
-
-    const nflGames = uniqueBy(daySnapshots.flatMap(d => d.nfl), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
-    const nbaGames = uniqueBy(daySnapshots.flatMap(d => d.nba), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
-    const mlbGames = uniqueBy(daySnapshots.flatMap(d => d.mlb), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
-    const nhlGames = uniqueBy(daySnapshots.flatMap(d => d.nhl), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
+    // ── ESPN schedules for the selected date ──
+    const [nflGames, nbaGames, mlbGames, nhlGames] = await Promise.all([
+      getESPNGames('football', 'nfl', pickedDate),
+      getESPNGames('basketball', 'nba', pickedDate),
+      getESPNGames('baseball', 'mlb', pickedDate),
+      getESPNGames('hockey', 'nhl', pickedDate),
+    ]);
 
     const scheduleMap = [
       { games: nflGames, name: 'NFL' },
@@ -376,27 +266,18 @@ const DataFeeds = (() => {
       { games: nhlGames, name: 'NHL' },
     ];
 
-    const upcomingOnly = games => (Array.isArray(games) ? games : []).filter(g => {
-      const startMs = g.startTime ? Date.parse(g.startTime) : NaN;
-      const hasValidTime = !!g.hasScheduledTime && !!g.time && !/tbd|tba|postponed|delayed/i.test(String(g.time));
-      return (g.statusState || 'pre') === 'pre' && !!g.awayTeam && !!g.homeTeam && hasValidTime && Number.isFinite(startMs) && startMs > Date.now();
-    });
-
-    let hasSchedule = false;
     for (const { games, name } of scheduleMap) {
-      const upcomingGames = upcomingOnly(games);
-      if (!upcomingGames.length) continue;
-      hasSchedule = true;
+      if (!games.length) continue;
       lines.push(`\n=== ${name} SCHEDULE (${dateLabel}) ===`);
-      upcomingGames.forEach(g => {
+      games.forEach(g => {
         const record = g.awayRecord && g.homeRecord ? ` (${g.awayRecord} vs ${g.homeRecord})` : '';
-        const when = g.time || 'TBD';
-        lines.push(`${g.awayTeam} @ ${g.homeTeam}${record} — ${when}`);
+        const score = g.awayScore != null ? ` — Score: ${g.awayScore}-${g.homeScore} (${g.status})` : ` — ${g.time}`;
+        lines.push(`${g.awayTeam} @ ${g.homeTeam}${record}${score} [${pickedDate}]`);
       });
       fetched.push(`${name} schedule`);
     }
 
-    // ── Real odds from The Odds API ──
+    // ── Real odds from The Odds API — single day range ──
     if (oddsKey) {
       const oddsSports = [
         { key: 'americanfootball_nfl', name: 'NFL' },
@@ -406,24 +287,24 @@ const DataFeeds = (() => {
         { key: 'mma_mixed_martial_arts', name: 'MMA/UFC' },
       ];
       for (const { key, name } of oddsSports) {
-        const oddsResult = await getLiveOdds(key, oddsKey, range, { useCacheOnly: !options.activeScreen, persistFreshOdds: !!options.activeScreen, sportName: name });
-        const odds = oddsResult?.rows || [];
-        if (!odds.length) continue;
+        const odds = await getLiveOdds(key, oddsKey, range);
+        if (!odds?.length) continue;
         lines.push(`\n=== ${name} LIVE ODDS (${dateLabel}) ===`);
-        odds.slice(0, 8).forEach(g => {
-          const time = g.commenceTime ? new Date(g.commenceTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' }) : '';
-          const ml = `${g.away} (${g.awayML ?? '—'}) @ ${g.home} (${g.homeML ?? '—'})`;
+        odds.slice(0, 10).forEach(g => {
+          const ml = `${g.away} (${g.awayML}) @ ${g.home} (${g.homeML})`;
           const spread = g.spread ? ` | Spread: ${g.spread}` : '';
-          const total = g.total != null ? ` | O/U: ${g.total}` : '';
-          lines.push(`${ml}${spread}${total}${time ? ' — ' + time : ''} [${g.book}]`);
+          const total = g.total ? ` | O/U: ${g.total}` : '';
+          const time = g.gameTime ? ` — ${g.gameTime}` : '';
+          const date = g.gameDate ? ` [${g.gameDate}]` : '';
+          lines.push(`${ml}${spread}${total}${time}${date} [${g.book}]`);
         });
-        fetched.push(`${name} odds${oddsResult?.fromCache ? ' (cache)' : ''}`);
+        fetched.push(`${name} odds`);
       }
     } else {
-      lines.push(`\n=== ODDS NOTE ===\nNo Odds API key set — add a free key from the-odds-api.com in Profile to get real moneylines, spreads, and totals. The system will still analyze matchups using schedules above.`);
+      lines.push('\n=== ODDS NOTE ===\nNo Odds API key — add free key from the-odds-api.com in Profile for real moneylines.');
     }
 
-    // ── ESPN team news & injuries ──
+    // ── ESPN injury news ──
     const [nflNews, nbaNews, mlbNews, nhlNews] = await Promise.all([
       getESPNNews('football', 'nfl'),
       getESPNNews('basketball', 'nba'),
@@ -431,14 +312,12 @@ const DataFeeds = (() => {
       getESPNNews('hockey', 'nhl'),
     ]);
 
-    const newsMap = [
+    for (const { news, name } of [
       { news: nflNews, name: 'NFL' },
       { news: nbaNews, name: 'NBA' },
       { news: mlbNews, name: 'MLB' },
       { news: nhlNews, name: 'NHL' },
-    ];
-
-    for (const { news, name } of newsMap) {
+    ]) {
       if (!news.length) continue;
       const injuryNews = news.filter(n =>
         /injur|out|questionable|scratch|ruled|doubt|miss|return/i.test(n.headline)
@@ -459,19 +338,18 @@ const DataFeeds = (() => {
       { sub: 'MMA', sport: 'MMA' },
     ];
 
-    for (const { sub, sport } of sportsReddits) {
+    for (const { sub } of sportsReddits) {
       const posts = await getRedditPosts(sub, 10);
       const relevant = posts.filter(p =>
         /injur|out|questionable|scratch|ruled|doubt|starter|lineup|preview|matchup|odds/i.test(p.title + p.flair)
       );
       if (relevant.length) {
         lines.push(`\n=== r/${sub} — Injury & Game News ===`);
-        relevant.slice(0, 5).forEach(p => lines.push(`[${p.score}↑] ${p.title}`));
+        relevant.slice(0, 4).forEach(p => lines.push(`[${p.score}↑] ${p.title}`));
         fetched.push(`r/${sub}`);
       }
     }
 
-    // ── User's additional notes ──
     if (userNotes?.trim()) {
       lines.push(`\n=== ADDITIONAL NOTES FROM USER ===\n${userNotes.trim()}`);
     }
@@ -481,7 +359,6 @@ const DataFeeds = (() => {
       sources: fetched,
       hasOdds: !!oddsKey,
       selectedDate: pickedDate,
-      dateMode,
       dateLabel,
       range,
       timestamp: new Date().toISOString(),
