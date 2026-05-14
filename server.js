@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const { google } = require('googleapis');
-const { chat, chatHyper, checkProviderStatus, getOllamaModels, PROVIDERS } = require('./providers');
+const { chat, checkProviderStatus, getOllamaModels, PROVIDERS } = require('./providers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,26 +14,13 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ──────────────────────────────────────────────
-// LLM PROXY — Cascade with continuation
+// LLM PROXY — Ollama → Gemini → Groq → OpenRouter
 // ──────────────────────────────────────────────
 async function handleChat(req, res) {
-  const { system, messages, max_tokens, forceProvider, hyperMode } = req.body;
+  const { system, messages, max_tokens, forceProvider } = req.body;
   if (!messages || !Array.isArray(messages))
     return res.status(400).json({ error: 'messages array required' });
   try {
-    if (hyperMode) {
-      // Hyper mode: call all available providers in parallel
-      const results = await chatHyper({ messages, system, maxTokens: max_tokens || 2000 });
-      if (!results.length) throw new Error('No providers returned results in hyper mode');
-      // Return the first (best) result; client handles merging
-      const best = results[0];
-      return res.json({
-        content: [{ type: 'text', text: best.text }],
-        provider: best.provider,
-        model: best.model,
-        hyperResults: results.map(r => ({ provider: r.provider, model: r.model, text: r.text })),
-      });
-    }
     const result = await chat({ messages, system, maxTokens: max_tokens || 2000, forceProvider });
     res.json({ content: [{ type: 'text', text: result.text }], provider: result.provider, model: result.model });
   } catch (err) {
@@ -43,20 +30,7 @@ async function handleChat(req, res) {
 }
 
 app.post('/api/chat', handleChat);
-app.post('/api/claude', handleChat); // legacy alias
-
-// ── Hyper mode parallel endpoint ──
-app.post('/api/chat/hyper', async (req, res) => {
-  const { system, messages, max_tokens } = req.body;
-  if (!messages || !Array.isArray(messages))
-    return res.status(400).json({ error: 'messages array required' });
-  try {
-    const results = await chatHyper({ messages, system, maxTokens: max_tokens || 1500 });
-    res.json({ results: results.map(r => ({ provider: r.provider, model: r.model, text: r.text })) });
-  } catch (err) {
-    res.status(503).json({ error: err.message, results: [] });
-  }
-});
+app.post('/api/claude', handleChat); // legacy alias — kept for any cached bookmarks
 
 // ──────────────────────────────────────────────
 // PROVIDER STATUS & MANAGEMENT
@@ -226,6 +200,7 @@ app.post('/api/sheets/upsert-agent', async (req, res) => {
   const { row, token, sheetId } = req.body;
   try {
     if (token && sheetId) {
+      // Simpler direct append for browser-authorized users; avoids server-side shared token requirements.
       await ensureSheetsDirect(token, sheetId).catch(() => {});
       await appendViaBearerToken({ token, sheetId, tab: 'Agent Performance', rows: [row] });
       return res.json({ success: true, mode: 'direct' });
@@ -245,17 +220,22 @@ app.post('/api/sheets/upsert-agent', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ──────────────────────────────────────────────
+// SHEETS READ — cross-device sync
+// ──────────────────────────────────────────────
 app.get('/api/sheets/read', async (req, res) => {
   const { tab, limit = 100 } = req.query;
   if (!tab) return res.status(400).json({ error: 'tab required' });
   try {
     const sheets = await getSheetsClient();
     if (!sheets) return res.status(401).json({ error: 'Not authorized with Google Sheets' });
+
     const lastRow = parseInt(limit) + 1;
     const range = `'${tab}'!A1:T${lastRow + 1}`;
     const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
     const rows = resp.data.values || [];
     if (rows.length < 2) return res.json([]);
+
     const headers = rows[0];
     const data = rows.slice(1, parseInt(limit) + 1).map(row =>
       Object.fromEntries(headers.map((h, i) => [h, row[i] || '']))
@@ -292,11 +272,9 @@ app.get('/api/results/list', (_req, res) => {
 // ──────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   const providerStatus = await checkProviderStatus();
-  const availableProviders = Object.entries(providerStatus).filter(([, v]) => v.available).map(([k]) => k);
   res.json({
     status: 'ok',
-    anyProviderAvailable: availableProviders.length > 0,
-    availableProviders,
+    anyProviderAvailable: Object.values(providerStatus).some(p => p.available),
     providers: providerStatus,
     sheetsConfigured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
     sheetsAuthorized: fs.existsSync(TOKEN_PATH),
@@ -310,16 +288,13 @@ app.get('/api/health', async (req, res) => {
 app.listen(PORT, async () => {
   const status = await checkProviderStatus();
   const models = await getOllamaModels();
-  console.log(`\n🧠 SAGE2 → http://localhost:${PORT}\n`);
+  console.log(`\n🧠 SAGE → http://localhost:${PORT}\n`);
   console.log('LLM Providers (priority order):');
-  console.log(`  1. 🖥️  Ollama      ${status.ollama.available    ? '✅  models: ' + (models.join(', ') || 'none found') : '❌  ' + status.ollama.reason}`);
-  console.log(`  2. ✨ Gemini     ${status.gemini.available    ? '✅  5 free models ready' : '⚠️   ' + status.gemini.reason}`);
-  console.log(`  3. ⚡ Groq       ${status.groq.available      ? '✅  5 free models ready' : '⚠️   ' + status.groq.reason}`);
-  console.log(`  4. 🌐 OpenRouter ${status.openrouter.available ? '✅  5 free models ready' : '⚠️   ' + status.openrouter.reason}`);
-  const active = Object.entries(status).filter(([, v]) => v.available);
-  console.log(active.length
-    ? `\n▶  Active providers: ${active.map(([k]) => k).join(', ')}\n`
-    : '\n⚠️  No providers available — add keys to .env or start Ollama.\n');
-  console.log(`⚡ Hyper Mode: uses all ${active.length} available provider(s) in parallel per agent`);
+  console.log(`  1. 🖥️  Ollama    ${status.ollama.available    ? '✅  models: ' + (models.join(', ') || 'none found') : '❌  ' + status.ollama.reason}`);
+  console.log(`  2. ✨ Gemini    ${status.gemini.available    ? '✅  ready' : '⚠️   ' + status.gemini.reason}`);
+  console.log(`  3. ⚡ Groq      ${status.groq.available      ? '✅  ready' : '⚠️   ' + status.groq.reason}`);
+  console.log(`  4. 🌐 OpenRouter ${status.openrouter.available ? '✅  ready' : '⚠️   ' + status.openrouter.reason}`);
+  const active = Object.entries(status).find(([, v]) => v.available);
+  console.log(active ? `\n▶  Will use: ${active[0].toUpperCase()}\n` : '\n⚠️  No providers available — add keys to .env or start Ollama.\n');
   console.log(`Google Sheets: ${fs.existsSync(TOKEN_PATH) ? '✅ authorized' : '⚠️  visit Settings to authorize'}\n`);
 });
