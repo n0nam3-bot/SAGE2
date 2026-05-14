@@ -178,7 +178,7 @@ const SheetsClient = (() => {
         await appendViaAppsScript(scriptUrl, 'Agent Performance', [row], { username: currentUsername(), action: 'upsert_agent' });
         return;
       }
-      await appendRowsDirect('Agent Performance', [row]);
+      await upsertAgentDirect(row);
     } catch (err) {
       console.warn('[Sheets] upsert agent failed:', err.message);
     }
@@ -236,6 +236,48 @@ const SheetsClient = (() => {
     return rows.slice(1).map(row =>
       Object.fromEntries(headers.map((h, i) => [h, row[i] || '']))
     );
+  }
+
+
+  async function upsertAgentDirect(row) {
+    const token = getToken();
+    const sheetId = getSheetId();
+    if (!token || !sheetId) throw new Error('Missing Sheets token or sheet ID');
+    const range = encodeURIComponent(`'Agent Performance'!A:A`);
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`;
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`Sheets read ${res.status}`);
+    const data = await res.json();
+    const rows = data.values || [];
+    const idx = rows.findIndex((r, i) => i > 0 && r[0] === row[0]);
+    if (idx >= 1) {
+      const rowRange = encodeURIComponent(`'Agent Performance'!A${idx + 1}`);
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rowRange}?valueInputOption=USER_ENTERED`, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: [row] }),
+      });
+      return;
+    }
+    await appendRowsDirect('Agent Performance', [row]);
+  }
+
+  async function overwriteRowsDirect(tab, rows) {
+    const token = getToken();
+    const sheetId = getSheetId();
+    if (!token || !sheetId) throw new Error('Missing Sheets token or sheet ID');
+    const clearRange = encodeURIComponent(`'${tab}'!A2:Z`);
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${clearRange}:clear`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    }).catch(() => {});
+    if (!rows?.length) return;
+    const range = encodeURIComponent(`'${tab}'!A2`);
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows }),
+    });
   }
 
   // ════════════════════════════════════════
@@ -312,7 +354,7 @@ const SheetsClient = (() => {
         range?.from || '',
         range?.to || '',
       ]);
-      await appendRows(tab, rowPayloads);
+      await overwriteRows(tab, rowPayloads);
     } catch (err) {
       console.warn('[Sheets] log fresh odds failed:', err.message);
     }
@@ -369,6 +411,7 @@ const SheetsClient = (() => {
     checkStatus, authorize,
     logTradingSession, logSportsSession,
     logFreshOddsSnapshot, syncAgentPerformance, logEquityPoint,
+    overwriteRows,
     loadSportsPicks, loadTradingPicks,
     getAppsScriptUrl, setAppsScriptUrl,
     appendViaAppsScript,
