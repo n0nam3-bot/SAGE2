@@ -116,6 +116,7 @@
         <option value="groq">⚡ Groq</option>
         <option value="openrouter">🌐 OpenRouter</option>
       </select>
+      <button id="hyper-toggle-btn" class="hyper-toggle-btn" onclick="LLM.toggleHyperMode(); UI.updateStatus(window._sageState || {});">⚡ Hyper</button>
       <button class="user-btn" onclick="Profile.openProfileModal()">
         <span class="user-avatar" id="header-avatar">U</span>
         <span id="header-username">User</span>
@@ -128,7 +129,6 @@
     <button class="tab-btn active" data-tab="trading">📈 Trading</button>
     <button class="tab-btn" data-tab="sports">🎰 Sports</button>
     <button class="tab-btn" data-tab="agents">🤖 Agents</button>
-    <button class="tab-btn" data-tab="performance">📊 Performance</button>
     <button class="tab-btn" data-tab="regime">🌡️ Regime</button>
     <button class="tab-btn" data-tab="backtest">⏪ Backtest</button>
   </nav>
@@ -234,14 +234,7 @@ Leave blank — SAGE fetches everything itself." style="min-height:90px"></texta
             Add a free key at <a href="https://the-odds-api.com" target="_blank" style="color:var(--accent-blue)">the-odds-api.com</a> → Profile → API Keys</span>
           </div>
           <div class="control-card">
-            <h3>📅 Date Range</h3>
-            <div class="form-group">
-              <label>Filter Mode</label>
-              <select id="sports-date-mode" onchange="SAGE.updateSportsDateMode?.(this.value)">
-                <option value="day">Single day</option>
-                <option value="week">Week starting Sunday</option>
-              </select>
-            </div>
+            <h3>📅 Event Date</h3>
             <div class="form-group">
               <label id="sports-date-label">Game start date</label>
               <input type="date" id="sports-date-filter">
