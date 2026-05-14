@@ -23,21 +23,21 @@ const UI = (() => {
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
     document.querySelector(`[data-tab="${tab}"]`)?.classList.add('active');
     document.getElementById(`tab-${tab}`)?.classList.add('active');
+    if (typeof SAGE !== 'undefined' && SAGE.setActiveTab) SAGE.setActiveTab(tab);
+    if (window._sageState) window._sageState.activeTab = tab;
   }
 
   // ════════════════════════════════════════
   // AGENT CARDS
   // ════════════════════════════════════════
   async function renderAgents() {
-    const container = document.getElementById('agents-grid') || document.getElementById('agents-container');
+    const container = document.getElementById('agents-container') || document.getElementById('agents-grid');
     if (!container) return;
+    const agents = await AgentManager.getAllAgents();
+    if (!agents.length) { container.innerHTML = '<div class="empty-agents">No agents initialized yet. Run a session first.</div>'; return; }
 
-    try {
-      const agents = await AgentManager.getAllAgents();
-      if (!Array.isArray(agents) || !agents.length) { container.innerHTML = '<div class="empty-agents">No agents initialized yet. Run a session first.</div>'; return; }
-
-      // Compute live stats from DB picks (so they show up even before manual outcome marking)
-      const allPicks = await DB.getAllPicks();
+    // Compute live stats from DB picks (so they show up even before manual outcome marking)
+    const allPicks = await DB.getAllPicks();
     const liveStats = {};
     for (const pick of allPicks) {
       const aid = pick.agentId;
@@ -70,27 +70,18 @@ const UI = (() => {
     const tradingAgents = agents.filter(a => a.domain === 'trading').sort((a, b) => b.weight - a.weight);
     const sportsAgents  = agents.filter(a => a.domain === 'sports').sort((a, b) => b.weight - a.weight);
 
-      container.innerHTML = `
-        <div class="agents-header">
-          <h2>🧠 Agent Performance</h2>
-          <div class="agent-header-actions">
-            <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
-            <button class="btn-sm" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
-            <button class="btn-sm" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
-          </div>
+    container.innerHTML = `
+      <div class="agents-header">
+        <h2>🧠 Agent Performance</h2>
+        <div class="agent-header-actions">
+          <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
+          <button class="btn-sm" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
+          <button class="btn-sm" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
         </div>
-        ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
-        ${renderDomainAgentTable('Sports', sportsAgents, liveStats)}
-      `;
-    } catch (err) {
-      console.error('[UI] renderAgents failed:', err);
-      container.innerHTML = `
-        <div class="empty-agents" style="padding:24px">
-          <div style="font-weight:700;margin-bottom:8px">Could not load agents</div>
-          <div style="color:var(--text-muted);font-size:13px">${err?.message || 'Unknown error'}</div>
-          <button class="btn-sm" style="margin-top:12px" onclick="UI.renderAgents()">Retry</button>
-        </div>`;
-    }
+      </div>
+      ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
+      ${renderDomainAgentTable('Sports', sportsAgents, liveStats)}
+    `;
   }
 
   function renderDomainAgentTable(label, agents, liveStats) {
@@ -759,7 +750,7 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
           title="Click to toggle multi-LLM consensus mode">
           ${consensusOn ? '🤝 Consensus ON' : '⚡ Single LLM'} (${activeProviders.length} keys)
         </span>` : ''}
-      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
+      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="UI.switchTab('profile')" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
       <span class="status-item">
