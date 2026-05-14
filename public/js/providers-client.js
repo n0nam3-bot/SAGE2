@@ -69,6 +69,7 @@ const LLM = (() => {
   async function chatMultiProvider({ system, messages, maxTokens = 2000 }) {
     const keys = Auth.getKeys();
     const configured = [];
+    if (IS_LOCAL) configured.push('ollama');
     if (keys.gemini)     configured.push('gemini');
     if (keys.groq)       configured.push('groq');
     if (keys.openrouter) configured.push('openrouter');
@@ -224,12 +225,27 @@ const LLM = (() => {
     return merged;
   }
 
+  function isHyperMode() {
+    return localStorage.getItem('sage_hyper_mode') === 'on' || localStorage.getItem('sage_consensus_mode') === 'on';
+  }
+
+  function setHyperMode(on) {
+    localStorage.setItem('sage_hyper_mode', on ? 'on' : 'off');
+    localStorage.setItem('sage_consensus_mode', on ? 'on' : 'off');
+  }
+
+  function toggleHyperMode() {
+    const next = !isHyperMode();
+    setHyperMode(next);
+    return next;
+  }
+
   function isConsensusMode() {
-    return localStorage.getItem('sage_consensus_mode') === 'on';
+    return isHyperMode();
   }
 
   function setConsensusMode(on) {
-    localStorage.setItem('sage_consensus_mode', on ? 'on' : 'off');
+    setHyperMode(on);
   }
 
 
@@ -425,10 +441,11 @@ const LLM = (() => {
 
   // ── Active provider name (for status bar) ──
   function activeProviderLabel() {
+    if (isHyperMode()) return '🔥 HYPER MODE ON';
     const mode = getProviderMode();
     if (mode === 'auto') return '🤖 Auto';
     return providerModeLabel(mode);
   }
 
-  return { chat, chatMultiProvider, isConsensusMode, setConsensusMode, testKey, activeProviderLabel, IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode, providerModeLabel, resolveProviderOrder };
+  return { chat, chatMultiProvider, isConsensusMode, setConsensusMode, isHyperMode, setHyperMode, toggleHyperMode, testKey, activeProviderLabel, IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode, providerModeLabel, resolveProviderOrder };
 })();
