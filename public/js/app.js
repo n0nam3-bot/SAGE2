@@ -92,8 +92,6 @@ const SAGE = (() => {
       const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
       sportsDate.value = local.toISOString().slice(0, 10);
     }
-    const sportsMode = document.getElementById('sports-date-mode');
-    if (sportsMode) sportsMode.value = localStorage.getItem('sage_sports_date_mode') || 'day';
     state.initialized = true;
 
     if (!window.__sageFocusListenersAdded) {
@@ -104,7 +102,7 @@ const SAGE = (() => {
     }
 
     window._sageState = state;
-    console.log('✅ SAGE2 ready |', LLM.activeProviderLabel(), '| Consensus:', LLM.isConsensusMode());
+    console.log('✅ SAGE2 ready |', LLM.activeProviderLabel(), '| Hyper:', LLM.isHyperMode?.());
     UI.hideLoading();
   }
 
@@ -180,8 +178,7 @@ const SAGE = (() => {
       UI.updateProgress({ stage: 'fetch', message: '🔍 Fetching schedules, odds, and injury reports...' });
       const keys = Auth.getKeys();
       const sportsDate = document.getElementById('sports-date-filter')?.value || new Date().toISOString().slice(0,10);
-      const sportsMode = document.getElementById('sports-date-mode')?.value || 'day';
-      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, mode: sportsMode, activeScreen: isForeground() });
+      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, activeScreen: isForeground() });
 
       if (!feedResult.hasOdds) {
         UI.showToast('⚠️ No Odds API key — add one free in Profile for real moneylines', 'warning');
@@ -241,47 +238,64 @@ const SAGE = (() => {
 
   // ── Update sports date mode label/value ──
   function updateSportsDateMode(mode) {
-    const safeMode = mode === 'week' ? 'week' : 'day';
-    localStorage.setItem('sage_sports_date_mode', safeMode);
     const label = document.getElementById('sports-date-label');
-    if (label) label.textContent = safeMode === 'week' ? 'Week start date' : 'Game start date';
+    if (label) label.textContent = 'Game start date';
     const dateInput = document.getElementById('sports-date-filter');
     if (dateInput && !dateInput.value) {
       const today = new Date();
       const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
       dateInput.value = local.toISOString().slice(0, 10);
     }
-    return safeMode;
+    return 'day';
   }
 
   // ── Run autoresearch on weakest agent ──
   async function runAutoresearch(domain) {
     if (!requireForeground('Autoresearch')) return;
+    const targets = domain === 'all' ? ['trading', 'sports'] : [domain];
     UI.showToast('Starting autoresearch...', 'info');
-    const result = await AgentManager.triggerAutoresearch(domain);
-    if (result.success) {
-      UI.showToast(`Autoresearch: shadow mode started for ${result.agentName}`, 'success');
+    let started = 0;
+    for (const target of targets) {
+      const result = await AgentManager.triggerAutoresearch(target);
+      if (result.success) started++;
+    }
+    if (started > 0) {
+      UI.showToast(`Autoresearch completed for ${started} domain(s)`, 'success');
       UI.renderAgents();
     } else {
-      UI.showToast('Autoresearch: ' + result.reason, 'warning');
+      UI.showToast('Autoresearch found no agent worth rewriting.', 'warning');
     }
+  }
+
+  async function runFixWeakestAgent(domain) {
+    return runAutoresearch(domain);
   }
 
   // ── Detect blind spots ──
   async function runBlindSpotDetection(domain) {
     if (!requireForeground('Blind spot scan')) return;
+    const targets = domain === 'all' ? ['trading', 'sports'] : [domain];
     UI.showToast('Scanning for blind spots...', 'info');
-    const spots = await AgentManager.detectBlindSpots(domain);
-    const spawnCheck = await AgentManager.checkSpawnCondition(domain);
+    let found = 0;
+    for (const target of targets) {
+      const spots = await AgentManager.detectBlindSpots(target);
+      found += spots.length;
+      const spawnCheck = await AgentManager.checkSpawnCondition(target);
 
-    if (spawnCheck?.shouldSpawn) {
-      const confirmed = window.confirm(`SAGE detected a repeated blind spot pattern:\n\n"${spawnCheck.suggestion}"\n\nSpawn a new specialist agent?`);
-      if (confirmed) {
-        const newAgent = await AgentManager.spawnAgent(domain, spawnCheck.suggestion, 'blind spot detection');
-        if (newAgent) UI.showToast(`New agent spawned: ${newAgent.name}`, 'success');
+      if (spawnCheck?.shouldSpawn) {
+        const confirmed = window.confirm(`SAGE detected a repeated blind spot pattern in ${target}:
+
+"${spawnCheck.suggestion}"
+
+Spawn a new specialist agent?`);
+        if (confirmed) {
+          const newAgent = await AgentManager.spawnAgent(target, spawnCheck.suggestion, 'blind spot detection');
+          if (newAgent) UI.showToast(`New agent spawned: ${newAgent.name}`, 'success');
+        }
       }
-    } else if (spots.length > 0) {
-      UI.showToast(`Found ${spots.length} blind spot(s). Check agent cards.`, 'warning');
+    }
+    if (found > 0) {
+      UI.showToast(`Found ${found} blind spot(s). Check agent cards.`, 'warning');
     } else {
       UI.showToast('No new blind spots detected.', 'info');
     }
@@ -337,6 +351,7 @@ const SAGE = (() => {
     runTradingSession,
     runSportsSession,
     runAutoresearch,
+    runFixWeakestAgent,
     runBlindSpotDetection,
     recordPickOutcome,
     runBacktest,
