@@ -3,126 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SAGE2 — Self-Improving AI Trading & Sportsbook Agents</title>
+  <title>SAGE2 — Multi-LLM AI Trading & Sports Intelligence</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
-  <style>
-    /* ── Hyper Mode styles ── */
-    .hyper-btn {
-      padding: 7px 14px;
-      border-radius: 8px;
-      border: 1px solid rgba(245,158,11,0.4);
-      background: var(--bg-2);
-      color: var(--accent-orange);
-      font-size: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      letter-spacing: 0.5px;
-      transition: all 0.15s;
-    }
-    .hyper-btn:hover { background: rgba(245,158,11,0.1); border-color: var(--accent-orange); }
-    .hyper-btn.active {
-      background: linear-gradient(135deg, rgba(124,58,237,0.3), rgba(245,158,11,0.3));
-      border: 2px solid var(--accent-orange);
-      color: #fff;
-      box-shadow: 0 0 12px rgba(245,158,11,0.3);
-    }
-
-    .hyper-indicator {
-      display: none;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      background: linear-gradient(135deg, rgba(124,58,237,0.12), rgba(245,158,11,0.12));
-      border: 1px solid rgba(245,158,11,0.4);
-      border-radius: 8px;
-      font-size: 12px;
-      color: var(--accent-orange);
-      margin-bottom: 2px;
-    }
-    .hyper-indicator .hyper-pulse {
-      width: 8px; height: 8px;
-      background: var(--accent-orange);
-      border-radius: 50%;
-      animation: pulse 1.2s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.7); }
-    }
-
-    .hyper-desc {
-      font-size: 11px;
-      color: var(--text-muted);
-      line-height: 1.5;
-      margin-top: 4px;
-    }
-
-    /* ── Sports date — single date only ── */
-    .date-control-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-    }
-    .date-control-card h3 {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-secondary);
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
-    .date-input-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .date-input-row input[type="date"] {
-      flex: 1;
-      padding: 8px 10px;
-      background: var(--bg-2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      color: var(--text-primary);
-      font-size: 13px;
-    }
-    .date-input-row input[type="date"]:focus { outline: none; border-color: var(--accent-blue); }
-    .date-today-btn {
-      padding: 7px 10px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--bg-3);
-      color: var(--text-secondary);
-      font-size: 11px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .date-today-btn:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
-
-    /* Picks limit notice */
-    .picks-limit-notice {
-      font-size: 11px;
-      color: var(--accent-cyan);
-      padding: 6px 10px;
-      background: rgba(6,182,212,0.08);
-      border: 1px solid rgba(6,182,212,0.2);
-      border-radius: 5px;
-      text-align: center;
-    }
-  </style>
 </head>
 <body>
 
 <!-- ═══════════════════════════════════════════════
-     AUTH SCREEN
+     AUTH SCREEN (shown before login)
 ══════════════════════════════════════════════════ -->
 <div id="auth-screen">
   <div class="auth-card">
     <div class="auth-logo">
       <div class="auth-logo-icon">🧠</div>
-      <div class="auth-logo-text">SAGE2</div>
+      <div class="auth-logo-text">SAGE<span style="color:var(--accent-cyan);font-size:0.7em;vertical-align:super">2</span></div>
     </div>
 
     <div class="auth-tabs">
@@ -158,7 +53,7 @@
     <div class="auth-footer">
       <div class="auth-security-note">
         🔒 Your API keys are encrypted with AES-256-GCM using your password.<br>
-        They are never sent to any server. SAGE2 is fully open source.
+        They are never sent to any server. SAGE is fully open source.
       </div>
       <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
         Import an existing profile? <button class="link-btn" onclick="showImportOnAuth()">Import →</button>
@@ -196,11 +91,12 @@
 ══════════════════════════════════════════════════ -->
 <div id="loading-overlay" style="display:none">
   <div class="loading-spinner"></div>
-  <div class="loading-text">Initializing SAGE2...</div>
+  <div class="loading-text" id="loading-text">Initializing SAGE2…</div>
+  <div id="loading-sub" style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:8px;min-height:18px"></div>
 </div>
 
 <!-- ═══════════════════════════════════════════════
-     APP SHELL
+     APP SHELL (hidden until logged in)
 ══════════════════════════════════════════════════ -->
 <div class="app-shell" id="app-shell" style="display:none">
 
@@ -209,11 +105,10 @@
     <div class="logo">
       <div class="logo-icon">🧠</div>
       <div>
-        <div class="logo-text">SAGE2</div>
+        <div class="logo-text">SAGE<span style="color:var(--accent-cyan);font-size:0.6em;vertical-align:super">2</span></div>
       </div>
     </div>
     <div class="header-right">
-      <button id="hyper-mode-btn" class="hyper-btn" onclick="toggleHyperMode(this)">⚡ Hyper Mode</button>
       <select id="status-provider" class="provider-select" onchange="LLM.setProviderMode(this.value)">
         <option value="auto">🤖 Auto</option>
         <option value="ollama">🖥️ Ollama</option>
@@ -246,15 +141,6 @@
       <div class="session-panel">
         <div class="session-controls">
 
-          <!-- Hyper Mode indicator -->
-          <div class="hyper-indicator" id="hyper-mode-indicator">
-            <div class="hyper-pulse"></div>
-            <div>
-              <strong>HYPER MODE ACTIVE</strong>
-              <div class="hyper-desc">All available providers (Gemini + Groq + OpenRouter + Ollama) consult on each agent simultaneously. Picks with multi-provider agreement get confidence boost.</div>
-            </div>
-          </div>
-
           <div class="auto-fetch-card">
             <div class="auto-fetch-icon">📡</div>
             <div class="auto-fetch-title">Auto-fetches live data</div>
@@ -267,13 +153,13 @@
           <div class="control-card">
             <h3>📝 Additional Notes <span style="font-weight:400;color:var(--text-muted)">(optional)</span></h3>
             <textarea class="context-textarea" id="trading-context"
-              placeholder="Anything SAGE2 can't find automatically...
+              placeholder="Anything SAGE can't find automatically...
 
 e.g. 'I heard insider chatter about X'
      'Ignore energy sector today'
      'Focus on small caps'
 
-Leave blank — SAGE2 fetches everything itself." style="min-height:90px"></textarea>
+Leave blank — SAGE fetches everything itself." style="min-height:90px"></textarea>
           </div>
 
           <div class="control-card">
@@ -316,7 +202,7 @@ Leave blank — SAGE2 fetches everything itself." style="min-height:90px"></text
           <div class="empty-state" style="padding-top:60px">
             <div style="font-size:48px;margin-bottom:16px">📈</div>
             <div style="font-size:16px;font-weight:600;margin-bottom:8px">Ready to run a trading session</div>
-            <div style="color:var(--text-secondary)">Hit <strong>Run Trading Session</strong> — SAGE2 auto-fetches<br>live market data then debates across 20 agents.</div>
+            <div style="color:var(--text-secondary)">Hit <strong>Run Trading Session</strong> — SAGE auto-fetches<br>live market data then debates across 20 agents.</div>
             <div class="what-fetches-box">
               <div class="wf-row">📡 <span>Reddit WSB, r/stocks, r/investing — real-time sentiment</span></div>
               <div class="wf-row">📰 <span>MarketWatch &amp; Reuters headlines</span></div>
@@ -333,15 +219,6 @@ Leave blank — SAGE2 fetches everything itself." style="min-height:90px"></text
       <div class="session-panel">
         <div class="session-controls">
 
-          <!-- Hyper Mode indicator (sports) -->
-          <div class="hyper-indicator" id="hyper-mode-indicator-sports">
-            <div class="hyper-pulse"></div>
-            <div>
-              <strong>HYPER MODE ACTIVE</strong>
-              <div class="hyper-desc">Multiple AI providers consult on each pick. Agreed picks ranked higher. Best 5 qualifying picks returned.</div>
-            </div>
-          </div>
-
           <div class="auto-fetch-card">
             <div class="auto-fetch-icon">📡</div>
             <div class="auto-fetch-title">Auto-fetches live data</div>
@@ -356,34 +233,31 @@ Leave blank — SAGE2 fetches everything itself." style="min-height:90px"></text
             <span style="font-size:11px;color:var(--text-muted)">Agents will analyze matchups without live odds.<br>
             Add a free key at <a href="https://the-odds-api.com" target="_blank" style="color:var(--accent-blue)">the-odds-api.com</a> → Profile → API Keys</span>
           </div>
-
-          <!-- Single date selector only -->
-          <div class="date-control-card">
-            <h3>📅 Game Date</h3>
-            <div class="date-input-row">
-              <input type="date" id="sports-date-filter">
-              <button class="date-today-btn" onclick="
-                const today = new Date();
-                const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
-                document.getElementById('sports-date-filter').value = local.toISOString().slice(0,10);
-              ">Today</button>
+          <div class="control-card">
+            <h3>📅 Date Range</h3>
+            <div class="form-group">
+              <label>Filter Mode</label>
+              <select id="sports-date-mode" onchange="SAGE.updateSportsDateMode?.(this.value)">
+                <option value="day">Single day</option>
+                <option value="week">Week starting Sunday</option>
+              </select>
             </div>
-          </div>
-
-          <div class="picks-limit-notice">
-            🎯 Returns top 5 picks with odds -200 or better
+            <div class="form-group">
+              <label id="sports-date-label">Game start date</label>
+              <input type="date" id="sports-date-filter">
+            </div>
           </div>
 
           <div class="control-card">
             <h3>📝 Additional Notes <span style="font-weight:400;color:var(--text-muted)">(optional)</span></h3>
             <textarea class="context-textarea" id="sports-context"
-              placeholder="Anything SAGE2 can't find automatically...
+              placeholder="Anything SAGE can't find automatically...
 
 e.g. 'Focus on NBA tonight only'
      'LeBron confirmed out per beat reporter'
      'Sharp action on Chiefs -3 per my sportsbook'
 
-Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="min-height:90px"></textarea>
+Leave blank — SAGE fetches schedules, odds, and injury news itself." style="min-height:100px"></textarea>
           </div>
 
           <button class="run-btn sports" id="run-sports-btn"
@@ -399,9 +273,8 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
           <div class="control-card">
             <h3>📏 Odds Rules</h3>
             <div style="font-size:12px;color:var(--text-secondary)">
-              <div style="padding:5px 0;border-bottom:1px solid var(--border)">✅ -200 or better only (e.g. -200, -150, +100, +250)</div>
-              <div style="padding:5px 0;border-bottom:1px solid var(--border)">❌ Below -200 filtered out</div>
-              <div style="padding:5px 0;border-bottom:1px solid var(--border)">🏆 Best 5 picks returned</div>
+              <div style="padding:5px 0;border-bottom:1px solid var(--border)">✅ -200 or higher only (including positive odds)</div>
+              <div style="padding:5px 0;border-bottom:1px solid var(--border)">❌ -201 and below filtered out</div>
               <div style="padding:5px 0;border-bottom:1px solid var(--border)">📊 Kelly Criterion sizing</div>
               <div style="padding:5px 0">🎯 25% fractional Kelly (max 3 units)</div>
             </div>
@@ -412,13 +285,12 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
           <div class="empty-state" style="padding-top:60px">
             <div style="font-size:48px;margin-bottom:16px">🎰</div>
             <div style="font-size:16px;font-weight:600;margin-bottom:8px">Ready to analyze sportsbook markets</div>
-            <div style="color:var(--text-secondary)">Hit <strong>Run Sports Session</strong> — SAGE2 auto-fetches<br>today's schedule, live odds, and injury reports.</div>
+            <div style="color:var(--text-secondary)">Hit <strong>Run Sports Session</strong> — SAGE auto-fetches<br>today's schedule, live odds, and injury reports.</div>
             <div class="what-fetches-box">
-              <div class="wf-row">📅 <span>ESPN: NFL, NBA, MLB, NHL schedules &amp; records for selected date</span></div>
+              <div class="wf-row">📅 <span>ESPN: today's NFL, NBA, MLB, NHL schedules &amp; records</span></div>
               <div class="wf-row">🤕 <span>ESPN injury reports for all sports</span></div>
               <div class="wf-row">💬 <span>Reddit injury threads (r/nfl, r/nba, r/baseball, r/hockey, r/MMA)</span></div>
-              <div class="wf-row">💰 <span>Live odds — ML, spread, O/U (add free Odds API key in Profile)</span></div>
-              <div class="wf-row">🏆 <span>Top 5 picks with -200 or better odds returned</span></div>
+              <div class="wf-row">💰 <span>Live odds — ML, spread, O/U, props, and more (add free Odds API key in Profile)</span></div>
             </div>
           </div>
         </div>
@@ -437,7 +309,7 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
           <button class="btn-primary" style="background:var(--accent-purple)" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
         </div>
       </div>
-      <div id="agents-grid"></div>
+      <div id="agents-container"></div>
     </div>
 
     <!-- ── PERFORMANCE TAB ── -->
@@ -456,7 +328,7 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
     <div class="tab-pane" id="tab-regime">
       <div style="margin-bottom:20px">
         <h2 style="font-size:18px;font-weight:700">Market Regime &amp; Cohort Control</h2>
-        <p style="font-size:13px;color:var(--text-muted)">Active regime determines which agent cohort is most trusted.</p>
+        <p style="font-size:13px;color:var(--text-muted)">Active regime determines which agent cohort is most trusted. Meta-layer tracks historical cohort performance per regime.</p>
       </div>
       <div id="regime-panel"></div>
     </div>
@@ -513,7 +385,7 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
     <div id="status-bar" style="display:flex;gap:20px;align-items:center;font-size:12px"></div>
   </div>
 
-</div>
+</div><!-- end app-shell -->
 
 <!-- ═══════════════════════════════════════════════
      SCRIPTS
@@ -533,22 +405,6 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
 <script src="js/app.js"></script>
 
 <script>
-  // ── Hyper Mode toggle ──
-  let _hyperModeOn = false;
-  function toggleHyperMode(btn) {
-    _hyperModeOn = !_hyperModeOn;
-    btn.classList.toggle('active', _hyperModeOn);
-    btn.textContent = _hyperModeOn ? '⚡ HYPER MODE ON' : '⚡ Hyper Mode';
-
-    // Show/hide both indicators
-    const ind1 = document.getElementById('hyper-mode-indicator');
-    const ind2 = document.getElementById('hyper-mode-indicator-sports');
-    if (ind1) ind1.style.display = _hyperModeOn ? 'flex' : 'none';
-    if (ind2) ind2.style.display = _hyperModeOn ? 'flex' : 'none';
-
-    SAGE.toggleHyperMode(_hyperModeOn);
-  }
-
   // ── Auth screen tab switching ──
   let authMode = 'login';
   function switchAuthTab(mode) {
@@ -585,31 +441,28 @@ Leave blank — SAGE2 fetches schedules, odds, and injury news itself." style="m
     }
   }
 
-  // ── On page load ──
+  // ── On page load: check for OAuth callback, check if already logged in ──
   document.addEventListener('DOMContentLoaded', async () => {
+
+    // Verify critical scripts loaded (catches path issues)
     if (typeof DB === 'undefined' || typeof Auth === 'undefined') {
       document.getElementById('auth-error').textContent =
         '⚠️ Scripts failed to load. Check browser console (F12) for errors.';
       document.getElementById('auth-error').style.display = 'block';
+      console.error('SAGE: DB or Auth is undefined — script load failure. Check that all paths are correct.');
       return;
     }
 
     Profile.checkOAuthCallback();
 
+    // Pre-fill last used username
     const lastUser = Auth.getLastUser();
     if (lastUser) {
       document.getElementById('auth-username').value = lastUser;
       document.getElementById('auth-password').focus();
     }
 
-    // Set default sports date to today
-    const sportsDate = document.getElementById('sports-date-filter');
-    if (sportsDate && !sportsDate.value) {
-      const today = new Date();
-      const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
-      sportsDate.value = local.toISOString().slice(0, 10);
-    }
-
+    // Show existing profiles on this device
     try {
       const profiles = await Auth.listProfiles();
       if (profiles.length > 0) {
