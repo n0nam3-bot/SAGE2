@@ -1,7 +1,7 @@
 // integrations/sheets.js — Google Sheets logging + Apps Script webhook support
 // Dual mode: localhost (server proxy) | GitHub Pages (direct Sheets API + Apps Script)
 
-const SheetsClient = globalThis.SheetsClient = (() => {
+var SheetsClient = globalThis.SheetsClient = (() => {
 
   function isLocal() {
     return typeof LLM !== 'undefined' && LLM.IS_LOCAL;
@@ -407,7 +407,7 @@ const SheetsClient = globalThis.SheetsClient = (() => {
     return m ? (parseFloat(m[2]) - parseFloat(m[1])).toFixed(3) : 'N/A';
   }
 
-  return {
+  const api = {
     checkStatus, authorize,
     logTradingSession, logSportsSession,
     logFreshOddsSnapshot, syncAgentPerformance, logEquityPoint,
@@ -416,4 +416,6 @@ const SheetsClient = globalThis.SheetsClient = (() => {
     getAppsScriptUrl, setAppsScriptUrl,
     appendViaAppsScript,
   };
+  Object.defineProperty(api, '__isRealSheetsClient', { value: true, enumerable: false });
+  return api;
 })();
