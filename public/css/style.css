@@ -1578,3 +1578,6 @@ body {
   .agent-table tbody td, .leaderboard-table tbody td { padding: 8px 6px; font-size: 12px; }
   .agents-header h2, .perf-section h3, .equity-section h3, .weight-evolution h3 { font-size: 16px; }
 }
+
+
+.agent-header-actions .provider-select, .agent-header-actions select { min-height: 34px; }
