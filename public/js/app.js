@@ -31,6 +31,158 @@ const SAGE = (() => {
     window._sageState = state;
   }
 
+  const SPORTS_LEAGUE_MAP = {
+    NFL: { sport: 'football', league: 'nfl' },
+    NBA: { sport: 'basketball', league: 'nba' },
+    MLB: { sport: 'baseball', league: 'mlb' },
+    NHL: { sport: 'hockey', league: 'nhl' },
+  };
+
+  function normalizeOutcomeLabel(value) {
+    return String(value || '').toLowerCase().trim();
+  }
+
+  function normalizePickText(value) {
+    return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function parsePickTeamFromText(pickText, gameText) {
+    const pick = normalizePickText(pickText);
+    const game = normalizePickText(gameText);
+    if (!pick || !game) return '';
+    const candidates = game.split(/\s*@\s*|\s+vs\.?\s+/i).map(s => s.trim()).filter(Boolean);
+    for (const team of candidates) {
+      if (pick.includes(team)) return team;
+    }
+    return '';
+  }
+
+  function parseTotalLine(pickText) {
+    const text = normalizePickText(pickText);
+    const m = text.match(/(over|under)\s+([0-9]+(?:\.[0-9]+)?)/i) || text.match(/\b([0-9]+(?:\.[0-9]+)?)\s*(over|under)\b/i);
+    if (!m) return null;
+    const side = String(m[1]).toLowerCase() === 'over' || String(m[2]).toLowerCase() === 'over' ? 'over' : 'under';
+    const line = Number(m[2] || m[1]);
+    return Number.isFinite(line) ? { side, line } : null;
+  }
+
+  function computeSportsPnl({ correct, odds, units }) {
+    const stake = Number(units) || 1;
+    if (!correct) return -Math.abs(stake);
+    const o = Number(odds);
+    if (!Number.isFinite(o) || o === 0) return Math.max(0.5, stake * 0.5);
+    return o > 0 ? stake * (o / 100) : stake * (100 / Math.abs(o));
+  }
+
+  function computeRunningRoi(picks) {
+    const resolved = picks.filter(p => p.domain === 'sports' && p.outcomeDate && Number.isFinite(Number(p.profitLoss ?? p.returnPct)));
+    const totalStake = resolved.reduce((sum, p) => sum + Math.max(0, Number(p.units) || 0), 0);
+    const totalPnL = resolved.reduce((sum, p) => sum + (Number(p.profitLoss ?? p.returnPct) || 0), 0);
+    if (!totalStake) return 0;
+    return Math.round((totalPnL / totalStake) * 1000) / 10;
+  }
+
+  async function determineSportsOutcome(pick) {
+    const sportKey = String(pick.sport || '').toUpperCase();
+    const leagueInfo = SPORTS_LEAGUE_MAP[sportKey];
+    if (!leagueInfo || !pick.event_date) return null;
+    const games = await DataFeeds.getESPNGames(leagueInfo.sport, leagueInfo.league, pick.event_date);
+    const game = games.find(g => {
+      const gameName = normalizePickText(`${g.awayTeam} @ ${g.homeTeam}`);
+      const pickGame = normalizePickText(pick.game);
+      return gameName === pickGame || gameName.includes(pickGame) || pickGame.includes(gameName);
+    });
+    if (!game || game.statusState !== 'post') return null;
+
+    const awayScore = Number(game.awayScore);
+    const homeScore = Number(game.homeScore);
+    if (!Number.isFinite(awayScore) || !Number.isFinite(homeScore)) return null;
+    const totalScore = awayScore + homeScore;
+    const gameText = normalizePickText(pick.game);
+    const pickText = normalizePickText(pick.pick);
+    const betType = normalizeOutcomeLabel(pick.betType || pick.bet_type);
+
+    let correct = null;
+    if (/total|over|under|ou/.test(betType) || /\b(over|under)\b/.test(pickText)) {
+      const parsed = parseTotalLine(pick.pick || pickText);
+      if (parsed) {
+        correct = parsed.side === 'over' ? totalScore > parsed.line : totalScore < parsed.line;
+      }
+    } else if (/spread|runline|puckline/.test(betType)) {
+      // Best-effort spread support when the line is embedded in the pick label.
+      const parsed = (pickText.match(/([+-]\d+(?:\.\d+)?)/) || [])[1];
+      const line = parsed ? Number(parsed) : NaN;
+      const team = parsePickTeamFromText(pick.pick, pick.game);
+      if (Number.isFinite(line) && team) {
+        const awayTeam = normalizePickText(game.awayTeam);
+        const homeTeam = normalizePickText(game.homeTeam);
+        const margin = awayScore - homeScore;
+        const pickedAway = normalizePickText(team) === awayTeam;
+        const pickedHome = normalizePickText(team) === homeTeam;
+        if (pickedAway) correct = (margin + line) > 0;
+        if (pickedHome) correct = (-margin + line) > 0;
+      }
+    } else {
+      const team = parsePickTeamFromText(pick.pick, pick.game);
+      const winner = awayScore > homeScore ? normalizePickText(game.awayTeam) : normalizePickText(game.homeTeam);
+      if (team) correct = normalizePickText(team) === winner;
+      else if (/away|road/.test(pickText) || pickText === normalizePickText(game.awayTeam)) correct = normalizePickText(game.awayTeam) === winner;
+      else if (/home/.test(pickText) || pickText === normalizePickText(game.homeTeam)) correct = normalizePickText(game.homeTeam) === winner;
+    }
+
+    if (correct == null) return null;
+    const pnl = computeSportsPnl({ correct, odds: pick.odds, units: pick.units });
+    return { correct, pnl, game, totalScore };
+  }
+
+  async function syncResolvedSportsPicks() {
+    if (!state.initialized || !isForeground()) return;
+    if (!state.sheetsStatus?.authorized && !Profile.getSheetsToken?.()) return;
+    const picks = await DB.getAllPicks();
+    const unresolved = picks.filter(p => p.domain === 'sports' && !p.outcomeDate && p.event_date && p.game && p.pick);
+    if (!unresolved.length) return;
+    let updated = 0;
+    for (const pick of unresolved) {
+      try {
+        const result = await determineSportsOutcome(pick);
+        if (!result) continue;
+        const pnl = result.pnl;
+        const correct = !!result.correct;
+        await SAGE.recordPickOutcome(pick.id, correct, pnl);
+        const allPicks = await DB.getAllPicks();
+        const runningRoi = computeRunningRoi(allPicks);
+        await globalThis.SheetsClient?.markSportsOutcome?.({
+          sessionId: pick.sessionId,
+          identifier: `${pick.game}||${pick.pick}`,
+          outcome: correct ? 'win' : 'loss',
+          pnl: Number(pnl.toFixed ? pnl.toFixed(2) : pnl),
+          runningRoi,
+          agentWeight: pick.agentWeight ?? pick.source_weight ?? '',
+        });
+        updated++;
+      } catch (err) {
+        console.warn('[SAGE] Sports outcome sync failed for', pick.game, err.message);
+      }
+    }
+    if (updated > 0) {
+      UI.renderPerformance();
+      UI.renderAgents();
+      if (state.sheetsStatus?.authorized) {
+        const agents = await AgentManager.getAllAgents();
+        await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
+      }
+    }
+  }
+
+  function scheduleOutcomeSync() {
+    if (window.__sageOutcomeSyncInterval) return;
+    window.__sageOutcomeSyncInterval = setInterval(() => {
+      if (state.runningSession || !isForeground()) return;
+      syncResolvedSportsPicks().catch(() => {});
+    }, 15 * 60 * 1000);
+  }
+
+
   // ── Boot (called after successful login) ──
   async function init() {
     console.log('🧠 SAGE initializing...');
@@ -84,8 +236,7 @@ const SAGE = (() => {
     _setLoadMsg('Building dashboard…');
     UI.renderAll();
     UI.updateStatus(state);
-    // refresh sheets status asynchronously in case auth/url state just changed
-    try { await SAGE.updateSheetsStatus?.(); } catch {}
+    scheduleOutcomeSync();
 
     // Initialize sports date controls
     const sportsDate = document.getElementById('sports-date-filter');
@@ -95,6 +246,7 @@ const SAGE = (() => {
       sportsDate.value = local.toISOString().slice(0, 10);
     }
     state.initialized = true;
+    syncResolvedSportsPicks().catch(() => {});
 
     if (!window.__sageFocusListenersAdded) {
       window.__sageFocusListenersAdded = true;
@@ -225,7 +377,8 @@ const SAGE = (() => {
 
       UI.renderSportsResults(result);
       window._sageState = state;
-    UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
+      syncResolvedSportsPicks().catch(() => {});
+      UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
 
     } catch (err) {
       console.error('[SAGE] Sports session error:', err);
@@ -308,7 +461,7 @@ Spawn a new specialist agent?`);
   async function recordPickOutcome(pickId, correct, returnPct) {
     const pick = await DB.get(DB.STORES.picks, pickId);
     if (!pick) return;
-    await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, outcomeDate: new Date().toISOString() });
+    await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, profitLoss: returnPct, outcomeDate: new Date().toISOString() });
 
     const agreedAgentIds = [
       pick.agentId,
@@ -321,6 +474,19 @@ Spawn a new specialist agent?`);
 
     for (const agentId of uniqueAgentIds) {
       await AgentManager.recordOutcome(agentId, pick.domain, correct, returnPct);
+    }
+
+    if (pick.domain === 'sports' && state.sheetsStatus?.authorized) {
+      const allPicks = await DB.getAllPicks();
+      const runningRoi = computeRunningRoi(allPicks);
+      await globalThis.SheetsClient?.markSportsOutcome?.({
+        sessionId: pick.sessionId,
+        identifier: `${pick.game}||${pick.pick || pick.ticker || ''}`,
+        outcome: correct ? 'win' : 'loss',
+        pnl: Number(returnPct || 0),
+        runningRoi,
+        agentWeight: pick.agentWeight ?? pick.source_weight ?? '',
+      });
     }
 
     await AgentManager.applyDarwinianUpdate(pick.domain);
