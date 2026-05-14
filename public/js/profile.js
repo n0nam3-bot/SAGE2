@@ -132,7 +132,7 @@ const Profile = (() => {
       persistProfileField('sheet_id', keys.sheet_id);
       persistProfileField('apps_script_url', keys.apps_script_url);
       localStorage.setItem('sage_sheet_id', keys.sheet_id || '');
-      if (keys.apps_script_url) SheetsClient.setAppsScriptUrl(keys.apps_script_url);
+      if (keys.apps_script_url) globalThis.SheetsClient?.setAppsScriptUrl?.(keys.apps_script_url);
       UI.showToast('Keys saved and encrypted ✅', 'success');
       document.getElementById('save-password').value = '';
       // Update status bar
@@ -272,7 +272,7 @@ const Profile = (() => {
 
       if (data?.success) {
         if (statusEl) { statusEl.textContent = '✅ Connected — tabs: ' + (data.tabs || []).join(', '); statusEl.className = 'test-result ok'; }
-        SheetsClient.setAppsScriptUrl(url);
+        globalThis.SheetsClient?.setAppsScriptUrl?.(url);
         // Also save it immediately so it persists without needing Save Keys
         const user = (Auth.getSession?.()?.username || Auth.getLastUser?.() || 'global').toLowerCase();
         localStorage.setItem('sage_apps_script_url', url);
@@ -462,21 +462,15 @@ const Profile = (() => {
     // Yield to browser so overlay paints before crypto starts
     await new Promise(r => setTimeout(r, 30));
 
-    let success = false;
     try {
       await Auth.login(username, password);
       if (loadTxt) loadTxt.textContent = 'Loading SAGE2…';
-      await SAGE.init();
       showApp();
-      success = true;
+      await SAGE.init();
     } catch (err) {
-      console.error('[SAGE] Login/init failed:', err);
-      Auth.logout();
-      showAuthScreen();
-      if (errEl) errEl.textContent = err.message || 'Login failed';
-    } finally {
       if (overlay) overlay.style.display = 'none';
-      if (btn && !success) { btn.disabled = false; btn.textContent = 'Login'; }
+      if (errEl) errEl.textContent = err.message;
+      if (btn) { btn.disabled = false; btn.textContent = 'Login'; }
     }
   }
 
@@ -489,27 +483,23 @@ const Profile = (() => {
     if (password !== confirm) { if (errEl) errEl.textContent = 'Passwords do not match'; return; }
     if (password.length < 8) { if (errEl) errEl.textContent = 'Password must be at least 8 characters'; return; }
     if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) { if (errEl) errEl.textContent = 'Username: 3-20 chars, letters/numbers/underscore only'; return; }
-    const btn = document.getElementById('auth-submit');
-    const _overlay = document.getElementById('loading-overlay');
-    const _loadTxt = document.getElementById('loading-text') || _overlay?.querySelector('.loading-text');
     try {
+      const btn = document.getElementById('auth-submit');
       if (btn) { btn.disabled = true; btn.textContent = 'Creating account...'; }
+      const _overlay = document.getElementById('loading-overlay');
+      const _loadTxt = document.getElementById('loading-text') || _overlay?.querySelector('.loading-text');
       if (_overlay) _overlay.style.display = 'flex';
       if (_loadTxt) _loadTxt.textContent = 'Setting up account…';
       await new Promise(r => setTimeout(r, 30));
       await Auth.register(username, password);
       if (_loadTxt) _loadTxt.textContent = 'Loading SAGE2…';
-      await SAGE.init();
       showApp();
+      await SAGE.init();
       UI.showToast(`Welcome, ${username}! Add your API keys in Profile → API Keys.`, 'success');
     } catch (err) {
-      console.error('[SAGE] Registration/init failed:', err);
-      Auth.logout();
-      showAuthScreen();
-      if (errEl) errEl.textContent = err.message || 'Registration failed';
+      if (errEl) errEl.textContent = err.message;
+      const btn = document.getElementById('auth-submit');
       if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
-    } finally {
-      if (_overlay) _overlay.style.display = 'none';
     }
   }
 
