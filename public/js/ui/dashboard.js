@@ -72,11 +72,16 @@ const UI = (() => {
 
     container.innerHTML = `
       <div class="agents-header">
-        <h2>🧠 Agent Performance</h2>
+        <h2>🧠 Agent Roster</h2>
         <div class="agent-header-actions">
+          <select id="agent-scope" class="provider-select" style="min-width:150px">
+            <option value="all">🌐 All domains</option>
+            <option value="trading">📈 Trading</option>
+            <option value="sports">🎰 Sports</option>
+          </select>
           <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
-          <button class="btn-sm" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
-          <button class="btn-sm" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
+          <button class="btn-sm" onclick="SAGE.runBlindSpotDetection(document.getElementById('agent-scope').value)">🔍 Find Blind Spots</button>
+          <button class="btn-sm" onclick="SAGE.runAutoresearch(document.getElementById('agent-scope').value)">🔬 Fix Weakest Agent</button>
         </div>
       </div>
       ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
@@ -750,7 +755,7 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
           title="Click to toggle multi-LLM consensus mode">
           ${consensusOn ? '🤝 Consensus ON' : '⚡ Single LLM'} (${activeProviders.length} keys)
         </span>` : ''}
-      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="UI.switchTab('profile')" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
+      <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
       <span class="status-item">
