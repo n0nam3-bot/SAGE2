@@ -1,4 +1,4 @@
-// app.js — SAGE2 main application controller
+// app.js — SAGE main application controller
 
 const SAGE = (() => {
 
@@ -10,14 +10,33 @@ const SAGE = (() => {
     runningSession: false,
     sheetsStatus: { authorized: false },
     regimes: { trading: 'bull', sports: 'mid_season' },
-    hyperMode: false,
   };
 
-  // ── Boot ──
-  async function init() {
-    console.log('🧠 SAGE2 initializing...');
-    UI.showLoading('Initializing SAGE2...');
+  function isForeground() {
+    try {
+      return document.visibilityState === 'visible' && document.hasFocus();
+    } catch {
+      return true;
+    }
+  }
 
+  function requireForeground(actionLabel = 'This action') {
+    if (isForeground()) return true;
+    UI.showToast(`${actionLabel} is paused while this tab is in the background.`, 'warning');
+    return false;
+  }
+
+  function setActiveTab(tab) {
+    state.activeTab = tab;
+    window._sageState = state;
+  }
+
+  // ── Boot (called after successful login) ──
+  async function init() {
+    console.log('🧠 SAGE initializing...');
+    UI.showLoading('Initializing SAGE...');
+
+    // Wire header user info
     const session = Auth.getSession();
     if (session) {
       const avatar = document.getElementById('header-avatar');
@@ -26,81 +45,89 @@ const SAGE = (() => {
       if (name) name.textContent = session.displayName;
     }
 
+    // Update provider selector in header
     const provEl = document.getElementById('status-provider');
     if (provEl) provEl.value = LLM.getProviderMode();
 
+    // Show/hide odds key nudge
     const oddsNudge = document.getElementById('odds-key-nudge');
     if (oddsNudge) {
       oddsNudge.style.display = Auth.getKeys().odds_api_key ? 'none' : 'flex';
     }
 
-    // Reset model indices for new session
-    LLM.resetModelIndices?.();
+    const _setLoadMsg = (msg) => {
+      const el = document.getElementById('loading-text') ||
+                 document.querySelector('#loading-overlay .loading-text') ||
+                 document.querySelector('.loading-text');
+      if (el) el.textContent = msg;
+    };
 
+    _setLoadMsg('Loading agents…');
     await AgentManager.init();
+
+    _setLoadMsg('Detecting market regime…');
     await RegimeEngine.loadRegime();
     state.regimes = RegimeEngine.currentRegime();
 
+    // Check sheets status
     if (Profile.hydrateSheetsToken) {
       await Profile.hydrateSheetsToken().catch(() => {});
     }
     if (LLM.IS_LOCAL) {
+      _setLoadMsg('Connecting to server…');
       state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
     } else {
-      state.sheetsStatus = { authorized: !!Profile.getSheetsToken(), configured: !!Auth.getKeys().google_client_id };
+      const appsScriptUrl = SheetsClient.getAppsScriptUrl();
+      state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
     }
 
+    _setLoadMsg('Building dashboard…');
     UI.renderAll();
     UI.updateStatus(state);
 
-    // Initialize sports date control — single date only
+    // Initialize sports date controls
     const sportsDate = document.getElementById('sports-date-filter');
     if (sportsDate && !sportsDate.value) {
       const today = new Date();
       const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
       sportsDate.value = local.toISOString().slice(0, 10);
     }
-
+    const sportsMode = document.getElementById('sports-date-mode');
+    if (sportsMode) sportsMode.value = localStorage.getItem('sage_sports_date_mode') || 'day';
     state.initialized = true;
-    console.log('✅ SAGE2 ready |', LLM.activeProviderLabel());
+
+    if (!window.__sageFocusListenersAdded) {
+      window.__sageFocusListenersAdded = true;
+      document.addEventListener('visibilitychange', () => UI.updateStatus(window._sageState || state));
+      window.addEventListener('focus', () => UI.updateStatus(window._sageState || state));
+      window.addEventListener('blur', () => UI.updateStatus(window._sageState || state));
+    }
+
+    window._sageState = state;
+    console.log('✅ SAGE2 ready |', LLM.activeProviderLabel(), '| Consensus:', LLM.isConsensusMode());
     UI.hideLoading();
   }
 
-  // ── Toggle Hyper Mode ──
-  function toggleHyperMode(enabled) {
-    state.hyperMode = enabled;
-    DebateEngine.setHyperMode(enabled);
-    const btn = document.getElementById('hyper-mode-btn');
-    if (btn) {
-      btn.textContent = enabled ? '⚡ HYPER MODE ON' : '⚡ Hyper Mode';
-      btn.style.background = enabled
-        ? 'linear-gradient(135deg, #7c3aed, #f59e0b)'
-        : '';
-      btn.style.border = enabled ? '2px solid #f59e0b' : '';
-    }
-    const indicator = document.getElementById('hyper-mode-indicator');
-    if (indicator) indicator.style.display = enabled ? 'flex' : 'none';
-    UI.showToast(enabled ? '⚡ Hyper Mode ON — all available providers will consult on each agent' : 'Hyper Mode OFF', enabled ? 'warning' : 'info');
-  }
-
-  // ── Run a trading session ──
+  // ── Run a trading session (auto-fetches market data first) ──
   async function runTradingSession(userNotes) {
     if (state.runningSession) return;
+    if (!requireForeground('Trading session')) return;
     state.runningSession = true;
     UI.setRunning(true, 'trading');
-    LLM.resetModelIndices?.();
 
     try {
+      // Step 1: Auto-fetch live market data
       UI.updateProgress({ stage: 'fetch', message: '🔍 Fetching live market data (Reddit, RSS, indices)...' });
       const keys = Auth.getKeys();
       const feedResult = await DataFeeds.buildTradingContext(keys, userNotes);
 
       UI.updateProgress({
         stage: 'layer1',
-        message: `✅ Fetched: ${feedResult.sources.join(', ') || 'general knowledge'} — starting debate${state.hyperMode ? ' [HYPER MODE]' : ''}...`,
+        message: `✅ Fetched: ${feedResult.sources.join(', ') || 'general knowledge'} — starting debate...`,
       });
       UI.showFetchSummary?.('trading', feedResult);
 
+      // Step 2: Run the debate with auto-fetched context
       const result = await DebateEngine.runTradingDebate(
         { marketContext: feedResult.context },
         (progress) => UI.updateProgress(progress)
@@ -122,7 +149,7 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (state.sheetsStatus?.sheetsAuthorized || Profile.getSheetsToken()) {
+      if (state.sheetsStatus?.authorized) {
         const agents = await AgentManager.getAllAgents();
         await SheetsClient.logTradingSession(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'trading'));
@@ -132,7 +159,7 @@ const SAGE = (() => {
       UI.showToast(`Trading session complete — ${result.finalPicks?.length || 0} picks`, 'success');
 
     } catch (err) {
-      console.error('[SAGE2] Trading session error:', err);
+      console.error('[SAGE] Trading session error:', err);
       UI.renderTradingResults({ error: err.message, layers: {}, finalPicks: [] });
       UI.showToast('Session error: ' + err.message, 'error');
     }
@@ -141,19 +168,20 @@ const SAGE = (() => {
     UI.setRunning(false, 'trading');
   }
 
-  // ── Run a sports session — single date ──
+  // ── Run a sports session (auto-fetches schedule + odds + injuries first) ──
   async function runSportsSession(userNotes) {
     if (state.runningSession) return;
+    if (!requireForeground('Sports session')) return;
     state.runningSession = true;
     UI.setRunning(true, 'sports');
-    LLM.resetModelIndices?.();
 
     try {
+      // Step 1: Auto-fetch live sports data
       UI.updateProgress({ stage: 'fetch', message: '🔍 Fetching schedules, odds, and injury reports...' });
       const keys = Auth.getKeys();
       const sportsDate = document.getElementById('sports-date-filter')?.value || new Date().toISOString().slice(0,10);
-
-      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate });
+      const sportsMode = document.getElementById('sports-date-mode')?.value || 'day';
+      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, mode: sportsMode, activeScreen: isForeground() });
 
       if (!feedResult.hasOdds) {
         UI.showToast('⚠️ No Odds API key — add one free in Profile for real moneylines', 'warning');
@@ -161,12 +189,13 @@ const SAGE = (() => {
 
       UI.updateProgress({
         stage: 'layer1',
-        message: `✅ Fetched: ${feedResult.sources.join(', ') || 'ESPN schedules'} — starting debate${state.hyperMode ? ' [HYPER MODE]' : ''}...`,
+        message: `✅ Fetched: ${feedResult.sources.join(', ') || 'ESPN schedules'} — starting debate...`,
       });
       UI.showFetchSummary?.('sports', feedResult);
 
+      // Step 2: Run the debate
       const result = await DebateEngine.runSportsDebate(
-        { gamesContext: feedResult.context },
+        { gamesContext: feedResult.context, scheduleData: feedResult.scheduleData || {} },
         (progress) => UI.updateProgress(progress)
       );
       state.lastSportsSession = result;
@@ -179,23 +208,28 @@ const SAGE = (() => {
           sport: pick.sport, game: pick.game, betType: pick.bet_type,
           pick: pick.pick, odds: pick.odds, units: pick.units,
           confidence: pick.confidence, reasoning: pick.full_reasoning,
+          agents_in_agreement: pick.agents_in_agreement || [],
+          agreement_agent_ids: pick.agreement_agent_ids || [],
+          agreement_llms: pick.agreement_llms || [],
+          agreement_breakdown: pick.agreement_breakdown || '',
           timestamp: new Date().toISOString(),
         });
       }
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (state.sheetsStatus?.sheetsAuthorized || Profile.getSheetsToken()) {
+      if (state.sheetsStatus?.authorized) {
         await SheetsClient.logSportsSession(result);
         const agents = await AgentManager.getAllAgents();
         await SheetsClient.syncAgentPerformance(agents.filter(a => a.domain === 'sports'));
       }
 
       UI.renderSportsResults(result);
-      UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} best picks (≥ -200)`, 'success');
+      window._sageState = state;
+    UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
 
     } catch (err) {
-      console.error('[SAGE2] Sports session error:', err);
+      console.error('[SAGE] Sports session error:', err);
       UI.renderSportsResults({ error: err.message, layers: {}, finalPicks: [] });
       UI.showToast('Session error: ' + err.message, 'error');
     }
@@ -204,7 +238,25 @@ const SAGE = (() => {
     UI.setRunning(false, 'sports');
   }
 
+
+  // ── Update sports date mode label/value ──
+  function updateSportsDateMode(mode) {
+    const safeMode = mode === 'week' ? 'week' : 'day';
+    localStorage.setItem('sage_sports_date_mode', safeMode);
+    const label = document.getElementById('sports-date-label');
+    if (label) label.textContent = safeMode === 'week' ? 'Week start date' : 'Game start date';
+    const dateInput = document.getElementById('sports-date-filter');
+    if (dateInput && !dateInput.value) {
+      const today = new Date();
+      const local = new Date(today.getTime() - today.getTimezoneOffset() * 60000);
+      dateInput.value = local.toISOString().slice(0, 10);
+    }
+    return safeMode;
+  }
+
+  // ── Run autoresearch on weakest agent ──
   async function runAutoresearch(domain) {
+    if (!requireForeground('Autoresearch')) return;
     UI.showToast('Starting autoresearch...', 'info');
     const result = await AgentManager.triggerAutoresearch(domain);
     if (result.success) {
@@ -215,13 +267,15 @@ const SAGE = (() => {
     }
   }
 
+  // ── Detect blind spots ──
   async function runBlindSpotDetection(domain) {
+    if (!requireForeground('Blind spot scan')) return;
     UI.showToast('Scanning for blind spots...', 'info');
     const spots = await AgentManager.detectBlindSpots(domain);
     const spawnCheck = await AgentManager.checkSpawnCondition(domain);
 
     if (spawnCheck?.shouldSpawn) {
-      const confirmed = window.confirm(`SAGE2 detected a repeated blind spot pattern:\n\n"${spawnCheck.suggestion}"\n\nSpawn a new specialist agent?`);
+      const confirmed = window.confirm(`SAGE detected a repeated blind spot pattern:\n\n"${spawnCheck.suggestion}"\n\nSpawn a new specialist agent?`);
       if (confirmed) {
         const newAgent = await AgentManager.spawnAgent(domain, spawnCheck.suggestion, 'blind spot detection');
         if (newAgent) UI.showToast(`New agent spawned: ${newAgent.name}`, 'success');
@@ -234,21 +288,38 @@ const SAGE = (() => {
     UI.renderAgents();
   }
 
+  // ── Record outcome for a pick ──
   async function recordPickOutcome(pickId, correct, returnPct) {
     const pick = await DB.get(DB.STORES.picks, pickId);
     if (!pick) return;
     await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, outcomeDate: new Date().toISOString() });
-    await AgentManager.recordOutcome(pick.agentId, pick.domain, correct, returnPct);
+
+    const agreedAgentIds = [
+      pick.agentId,
+      ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+      ...(Array.isArray(pick.agents_in_agreement)
+        ? pick.agents_in_agreement.filter(v => /^([st]_[a-z0-9_]+)$/i.test(String(v).trim()))
+        : []),
+    ].map(v => String(v).trim()).filter(Boolean);
+    const uniqueAgentIds = [...new Set(agreedAgentIds)];
+
+    for (const agentId of uniqueAgentIds) {
+      await AgentManager.recordOutcome(agentId, pick.domain, correct, returnPct);
+    }
+
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (state.sheetsStatus.authorized) {
+    if (state.sheetsStatus?.authorized) {
       await SheetsClient.syncAgentPerformance(agents);
     }
     UI.renderPerformance();
+    UI.renderAgents();
     UI.showToast('Outcome recorded ✅', 'success');
   }
 
+  // ── Run backtest ──
   async function runBacktest(config) {
+    if (!requireForeground('Backtest')) return;
     UI.showToast('Starting backtest...', 'info');
     try {
       const results = await BacktestEngine.run(config, (p) => {
@@ -263,21 +334,27 @@ const SAGE = (() => {
 
   return {
     init,
-    toggleHyperMode,
     runTradingSession,
     runSportsSession,
     runAutoresearch,
     runBlindSpotDetection,
     recordPickOutcome,
     runBacktest,
+    updateSportsDateMode,
+    setActiveTab,
+    isForeground,
     getState: () => state,
     updateSheetsStatus: async () => {
       if (LLM.IS_LOCAL) {
         state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
       } else {
-        state.sheetsStatus = { authorized: !!Profile.getSheetsToken(), sheetsAuthorized: !!Profile.getSheetsToken() };
+        const _scriptUrl = SheetsClient.getAppsScriptUrl();
+        state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
       }
       UI.updateStatus(state);
     },
   };
 })();
+
+// ── App boots only after successful login (called from profile.js) ──
+// See: Profile.doLogin() and Profile.doRegister() in profile.js
