@@ -383,6 +383,25 @@ Leave blank — SAGE fetches schedules, odds, and injury news itself." style="mi
 <!-- ═══════════════════════════════════════════════
      SCRIPTS
 ══════════════════════════════════════════════════ -->
+<script>
+  window.SheetsClient = window.SheetsClient || {
+    checkStatus: async () => ({ authorized: false, configured: false }),
+    authorize: async () => false,
+    appendRows: async () => {},
+    logTradingSession: async () => {},
+    logSportsSession: async () => {},
+    logFreshOddsSnapshot: async () => {},
+    syncAgentPerformance: async () => {},
+    logEquityPoint: async () => {},
+    overwriteRows: async () => {},
+    loadSportsPicks: async () => null,
+    loadTradingPicks: async () => null,
+    getAppsScriptUrl: () => '',
+    setAppsScriptUrl: () => {},
+    appendViaAppsScript: async () => {},
+  };
+  var SheetsClient = window.SheetsClient;
+</script>
 <script src="js/db.js"></script>
 <script src="js/auth.js"></script>
 <script src="js/providers-client.js"></script>
