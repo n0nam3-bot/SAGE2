@@ -1,7 +1,7 @@
 // integrations/sheets.js — Google Sheets logging + Apps Script webhook support
 // Dual mode: localhost (server proxy) | GitHub Pages (direct Sheets API + Apps Script)
 
-const SheetsClient = (() => {
+const SheetsClient = globalThis.SheetsClient = (() => {
 
   function isLocal() {
     return typeof LLM !== 'undefined' && LLM.IS_LOCAL;
