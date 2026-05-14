@@ -525,7 +525,7 @@ Provide your picks in the specified JSON format.`;
       game,
       event_date: raw.event_date ?? raw.game_date ?? raw.date ?? raw.original_bet?.event_date ?? '',
       game_time: raw.game_time ?? raw.time ?? raw.start_time ?? raw.original_bet?.game_time ?? '',
-      bet_type: raw.bet_type || raw.market || raw.original_bet?.bet_type || 'Moneyline',
+      bet_type: normalizeMarketFamily(raw.bet_type || raw.market || raw.original_bet?.bet_type || 'Moneyline'),
       pick: typeof pick === 'string' ? pick : String(pick),
       odds,
       implied_prob_pct: raw.implied_prob_pct != null ? Number(raw.implied_prob_pct) : calcImpliedProbPct(odds),
@@ -540,45 +540,31 @@ Provide your picks in the specified JSON format.`;
     return normalized;
   }
 
-  function normalizeSportsText(value) {
-    return String(value || '')
-      .toLowerCase()
-      .replace(/&/g, ' and ')
-      .replace(/[^a-z0-9\s.+-]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+  function normalizeMarketFamily(value) {
+    const raw = String(value || '').toLowerCase();
+    if (!raw) return 'moneyline';
+    if (/money\s*line|\bml\b|h2h|head\s*to\s*head/.test(raw)) return 'moneyline';
+    if (/spread|runline|puckline/.test(raw) && !/total|over|under|ou/.test(raw)) return 'spread';
+    if (/total|over\s*under|\bou\b|o\/u/.test(raw)) return 'total';
+    if (/prop/.test(raw)) return 'prop';
+    return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'moneyline';
   }
 
-  function normalizeSportsMarket(value) {
-    const text = normalizeSportsText(value);
-    if (!text) return '';
-    if (/(money\s*line|\bml\b)/.test(text)) return 'moneyline';
-    if (/(spread|run line|puck line|handicap|\bats\b|\bpts\b)/.test(text)) return 'spread';
-    if (/(over|under|o\/u|\btotal\b)/.test(text)) return 'total';
-    if (/(prop|player prop|proposition)/.test(text)) return 'prop';
-    return text;
-  }
-
-  function normalizeSportsSelection(value, market = '') {
-    let text = normalizeSportsText(value);
-    if (!text) return '';
-    text = text
-      .replace(/\b(money\s*line|moneyline|\bml\b)\b/g, '')
-      .replace(/\b(over|under|o\/u|\btotal\b|\bspread\b|run line|puck line)\b/g, '')
-      .replace(/\b(points?|pts?)\b/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return text || normalizeSportsText(value) || normalizeSportsMarket(market);
+  function normalizePickLabel(pick, family) {
+    const raw = String(pick || '').toLowerCase().trim();
+    const cleaned = raw.replace(/\b(money\s*line|moneyline|\bml\b|spread|total|totals?|over\/?under|ou)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (family === 'moneyline') return cleaned;
+    return cleaned;
   }
 
   function dedupeSportsPickKey(p) {
-    const market = normalizeSportsMarket(p.bet_type || p.market || p.type || '');
-    const selection = normalizeSportsSelection(p.pick || p.selection || p.recommended_bet || '', market);
+    const family = normalizeMarketFamily(p.bet_type || p.market);
+    const pick = normalizePickLabel(p.pick, family);
     return [
-      normalizeSportsText(p.sport || ''),
-      normalizeSportsText(p.game || p.event || ''),
-      market,
-      selection,
+      (p.sport || '').toLowerCase(),
+      (p.game || p.event || '').toLowerCase(),
+      family,
+      pick,
     ].join('|');
   }
 
