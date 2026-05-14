@@ -284,11 +284,15 @@ const Profile = (() => {
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        // Refresh status bar immediately
+        // Refresh status bar and app state immediately
         const state = globalThis._sageState || { sheetsStatus: {} };
         state.sheetsStatus = { ...(state.sheetsStatus || {}), authorized: true, appsScriptConfigured: true };
         globalThis._sageState = state;
-        UI.updateStatus?.(state);
+        if (globalThis.SAGE?.updateSheetsStatus) {
+          await globalThis.SAGE.updateSheetsStatus();
+        } else {
+          UI.updateStatus?.(state);
+        }
       } else if (text.includes('script.google.com') || text.includes('<!DOCTYPE')) {
         if (statusEl) {
           statusEl.textContent = '⚠️ Got HTML instead of JSON — deployment may need "Execute as: Me" and "Who has access: Anyone"';
