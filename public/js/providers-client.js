@@ -1,9 +1,11 @@
 // providers-client.js — Browser-side LLM provider cascade
-// Best free models: Gemini → Groq → OpenRouter → Ollama
-// Cascade continues where it left off when tokens are exhausted
+// Ollama → Gemini → Groq → OpenRouter, called directly from browser
+// When running on localhost with server.js, uses /api/chat proxy instead
 
 const LLM = (() => {
 
+  // Detect if local server is available (self-host mode)
+  // Covers localhost, 127.0.0.1, and local network IPs (192.168.x.x, 10.x.x.x)
   const IS_LOCAL = (() => {
     const h = window.location.hostname;
     return h === 'localhost' || h === '127.0.0.1' ||
@@ -11,9 +13,10 @@ const LLM = (() => {
            h.startsWith('172.') || h === '';
   })();
 
+  // Provider metadata
   const PROVIDER_INFO = {
     auto:       { name: 'Auto',             icon: '🤖', cors: true  },
-    ollama:     { name: 'Ollama (Local)',   icon: '🖥️', cors: false },
+    ollama:     { name: 'Ollama (Local)',   icon: '🖥️', cors: false }, // blocked on HTTPS
     gemini:     { name: 'Google Gemini',    icon: '✨', cors: true  },
     groq:       { name: 'Groq',             icon: '⚡', cors: true  },
     openrouter: { name: 'OpenRouter',       icon: '🌐', cors: true  },
@@ -22,34 +25,6 @@ const LLM = (() => {
   const PROVIDER_ORDER = ['ollama', 'gemini', 'groq', 'openrouter'];
   const PROVIDER_MODE_KEY = 'sage_provider_mode';
   const VALID_PROVIDER_MODES = new Set(['auto', ...PROVIDER_ORDER]);
-
-  // Best 5 free models per provider — ordered by quality for trading/sports analysis
-  const GEMINI_FREE_MODELS = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
-  ];
-
-  const GROQ_FREE_MODELS = [
-    'llama-3.3-70b-versatile',
-    'llama-3.1-70b-versatile',
-    'mixtral-8x7b-32768',
-    'llama3-70b-8192',
-    'gemma2-9b-it',
-  ];
-
-  const OPENROUTER_FREE_MODELS = [
-    'meta-llama/llama-3.3-70b-instruct:free',
-    'google/gemini-2.0-flash-exp:free',
-    'mistralai/mistral-7b-instruct:free',
-    'qwen/qwen-2.5-72b-instruct:free',
-    'microsoft/phi-4:free',
-  ];
-
-  // Per-session model index tracker (persists across cascade calls in a session)
-  const _modelIndex = { gemini: 0, groq: 0, openrouter: 0 };
 
   function getProviderMode() {
     const stored = (localStorage.getItem(PROVIDER_MODE_KEY) || 'auto').toLowerCase();
@@ -80,40 +55,189 @@ const LLM = (() => {
   async function chat({ system, messages, maxTokens = 2000, forceProvider = null }) {
     const providerMode = forceProvider || getProviderMode();
     const resolvedProvider = providerMode === 'auto' ? null : providerMode;
+    // If server is running locally, proxy through it (supports Ollama too)
     if (IS_LOCAL) {
       return callServerProxy({ system, messages, maxTokens, forceProvider: resolvedProvider });
     }
+    // Otherwise call providers directly from browser
     return callCascade({ system, messages, maxTokens, preferredProvider: providerMode });
   }
 
-  // ── Hyper Mode: call ALL available providers in parallel for a single agent ──
-  // Returns array of results from each provider
-  async function chatHyper({ system, messages, maxTokens = 2000 }) {
-    if (IS_LOCAL) {
-      // Server handles hyper mode
-      return callServerProxy({ system, messages, maxTokens, hyperMode: true })
-        .then(r => [r]).catch(() => []);
-    }
+  // ── Multi-provider consensus: call all configured providers in parallel ──
+  // Returns merged picks/analysis from Gemini + Groq + OpenRouter simultaneously.
+  // Each provider runs the same prompt; results are merged before returning.
+  async function chatMultiProvider({ system, messages, maxTokens = 2000 }) {
     const keys = Auth.getKeys();
-    const results = [];
-    const providers = [];
+    const configured = [];
+    if (keys.gemini)     configured.push('gemini');
+    if (keys.groq)       configured.push('groq');
+    if (keys.openrouter) configured.push('openrouter');
 
-    if (keys.gemini) providers.push(callGemini(keys.gemini, system, messages, maxTokens).then(r => ({ ...r, provider: 'gemini' })).catch(() => null));
-    if (keys.groq) providers.push(callGroq(keys.groq, system, messages, maxTokens).then(r => ({ ...r, provider: 'groq' })).catch(() => null));
-    if (keys.openrouter) providers.push(callOpenRouter(keys.openrouter, system, messages, maxTokens).then(r => ({ ...r, provider: 'openrouter' })).catch(() => null));
+    // If only one (or zero) providers, fall back to regular chat
+    if (configured.length <= 1) return chat({ system, messages, maxTokens });
 
-    const settled = await Promise.allSettled(providers);
-    for (const s of settled) {
-      if (s.status === 'fulfilled' && s.value) results.push(s.value);
-    }
-    return results.length ? results : [await callCascade({ system, messages, maxTokens, preferredProvider: 'auto' })];
+    // Call all configured providers in parallel
+    const results = await Promise.allSettled(
+      configured.map(provider => callCascade({ system, messages, maxTokens, preferredProvider: provider }))
+    );
+
+    const successes = results
+      .map((r, i) => r.status === 'fulfilled' ? { provider: configured[i], text: r.value.text, model: r.value.model } : null)
+      .filter(Boolean);
+
+    if (successes.length === 0) throw new Error('All providers failed in consensus mode');
+    if (successes.length === 1) return {
+      text: successes[0].text,
+      provider: successes[0].provider,
+      model: successes[0].model,
+      consensus: false,
+      providerOutputs: successes,
+    };
+
+    // Merge the responses for the agent to read, but preserve every provider output
+    const merged = mergeProviderResponses(successes);
+    return {
+      text: merged,
+      provider: `consensus(${successes.map(s=>s.provider).join('+')})`,
+      model: 'multi',
+      consensus: true,
+      providerCount: successes.length,
+      providerOutputs: successes,
+    };
   }
 
-  // ── Server proxy ──
-  async function callServerProxy({ system, messages, maxTokens, forceProvider = null, hyperMode = false }) {
+  // Merge multiple JSON responses from different providers into one unified result.
+  // Strategy: parse each, union arrays, average scalar confidence fields.
+  function mergeProviderResponses(responses) {
+    const parsed = [];
+    for (const r of responses) {
+      try {
+        const m = r.text.match(/```(?:json)?\s*([\s\S]*?)```/) || r.text.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
+        if (m) parsed.push({ provider: r.provider, data: JSON.parse(m[1] || m[0]) });
+        else parsed.push({ provider: r.provider, data: JSON.parse(r.text) });
+      } catch {
+        // If can't parse, keep raw text
+        parsed.push({ provider: r.provider, data: null, raw: r.text });
+      }
+    }
+
+    const validParsed = parsed.filter(p => p.data != null);
+    if (validParsed.length === 0) {
+      // All failed to parse — return the longest raw text
+      const best = responses.reduce((a, b) => (a.text?.length || 0) > (b.text?.length || 0) ? a : b);
+      return best.text;
+    }
+
+    // If all are arrays (sports picks), merge them
+    if (validParsed.every(p => Array.isArray(p.data))) {
+      const allPicks = validParsed.flatMap(p => p.data.map(pick => ({ ...pick, _source_provider: p.provider })));
+      const deduped = dedupePicksByKey(allPicks);
+      // Average confidence across duplicate picks
+      const avgd = boostConsensusConfidence(allPicks, deduped);
+      return JSON.stringify(avgd);
+    }
+
+    // If all are objects, merge fields
+    if (validParsed.every(p => !Array.isArray(p.data) && typeof p.data === 'object')) {
+      const merged = mergeJsonObjects(validParsed.map(p => p.data));
+      // Mark which providers agreed
+      merged._consensus_providers = validParsed.map(p => p.provider);
+      return JSON.stringify(merged);
+    }
+
+    // Mixed — return best (highest confidence or longest)
+    const best = validParsed.reduce((a, b) => {
+      const sa = Array.isArray(a.data) ? a.data.length : (a.data?.conviction || a.data?.confidence || 0);
+      const sb = Array.isArray(b.data) ? b.data.length : (b.data?.conviction || b.data?.confidence || 0);
+      return sa >= sb ? a : b;
+    });
+    best.data._consensus_providers = validParsed.map(p => p.provider);
+    return JSON.stringify(best.data);
+  }
+
+  function dedupePicksByKey(picks) {
+    const seen = new Map();
+    for (const pick of picks) {
+      const key = [
+        (pick.sport || '').toLowerCase(),
+        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
+        (pick.bet_type || '').toLowerCase(),
+        (pick.pick || '').toLowerCase().slice(0, 20),
+      ].join('|');
+      if (!seen.has(key)) seen.set(key, []);
+      seen.get(key).push(pick);
+    }
+    return [...seen.values()].map(group => group[0]); // take first of each group
+  }
+
+  function boostConsensusConfidence(allPicks, deduped) {
+    return deduped.map(pick => {
+      const key = [
+        (pick.sport || '').toLowerCase(),
+        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
+        (pick.bet_type || '').toLowerCase(),
+        (pick.pick || '').toLowerCase().slice(0, 20),
+      ].join('|');
+      const matches = allPicks.filter(p => [
+        (p.sport || '').toLowerCase(),
+        (p.game || p.event || '').toLowerCase().slice(0, 30),
+        (p.bet_type || '').toLowerCase(),
+        (p.pick || '').toLowerCase().slice(0, 20),
+      ].join('|') === key);
+      const avgConf = matches.reduce((s, p) => s + (Number(p.confidence) || 50), 0) / matches.length;
+      const agreementBoost = (matches.length - 1) * 5; // +5 per extra provider that agrees
+      const providers = [...new Set(matches.map(p => p._source_provider).filter(Boolean))];
+      const agentAgreements = [...new Set(matches.flatMap(p => Array.isArray(p.agents_in_agreement) ? p.agents_in_agreement : []).filter(Boolean))];
+      return {
+        ...pick,
+        confidence: Math.min(95, Math.round(avgConf + agreementBoost)),
+        agents_in_agreement: agentAgreements.length ? agentAgreements : providers.map(p => p + ' LLM'),
+        agreement_llms: providers,
+        _provider_count: matches.length,
+      };
+    });
+  }
+
+  function mergeJsonObjects(objects) {
+    const merged = {};
+    for (const obj of objects) {
+      for (const [key, val] of Object.entries(obj)) {
+        if (!(key in merged)) { merged[key] = val; continue; }
+        // Arrays: concatenate and dedupe
+        if (Array.isArray(merged[key]) && Array.isArray(val)) {
+          merged[key] = [...merged[key], ...val.filter(v =>
+            !merged[key].some(existing => JSON.stringify(existing) === JSON.stringify(v))
+          )];
+          continue;
+        }
+        // Numbers: average
+        if (typeof merged[key] === 'number' && typeof val === 'number') {
+          merged[key] = (merged[key] + val) / 2;
+          continue;
+        }
+        // Strings: keep the longer/more detailed one
+        if (typeof merged[key] === 'string' && typeof val === 'string') {
+          if (val.length > merged[key].length) merged[key] = val;
+        }
+      }
+    }
+    return merged;
+  }
+
+  function isConsensusMode() {
+    return localStorage.getItem('sage_consensus_mode') === 'on';
+  }
+
+  function setConsensusMode(on) {
+    localStorage.setItem('sage_consensus_mode', on ? 'on' : 'off');
+  }
+
+
+
+  // ── Server proxy (localhost self-host mode) ──
+  async function callServerProxy({ system, messages, maxTokens, forceProvider = null }) {
     const body = { system, messages, max_tokens: maxTokens };
     if (forceProvider) body.forceProvider = forceProvider;
-    if (hyperMode) body.hyperMode = true;
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -127,13 +251,14 @@ const LLM = (() => {
     return { text: data.content?.[0]?.text || '', provider: data.provider || 'server', model: data.model || '' };
   }
 
-  // ── Direct browser cascade — continues from last successful model index ──
+  // ── Direct browser cascade ──
   async function callCascade({ system, messages, maxTokens, preferredProvider = 'auto' }) {
     const keys = Auth.getKeys();
     const errors = [];
     const order = resolveProviderOrder(preferredProvider);
 
     for (const provider of order) {
+      // Ollama skipped on GitHub Pages (mixed content: HTTPS → HTTP)
       if (!IS_LOCAL && provider === 'ollama') continue;
       if (!keys[provider] && provider !== 'ollama') continue;
       try {
@@ -142,7 +267,7 @@ const LLM = (() => {
         if (provider === 'groq') return await callGroq(keys.groq, system, messages, maxTokens);
         if (provider === 'openrouter') return await callOpenRouter(keys.openrouter, system, messages, maxTokens);
       } catch (e) {
-        errors.push(`${provider}: ${e.message}`);
+        errors.push(`${provider.charAt(0).toUpperCase() + provider.slice(1)}: ${e.message}`);
       }
     }
 
@@ -151,9 +276,11 @@ const LLM = (() => {
     throw new Error('All providers failed. ' + errors.join(' | '));
   }
 
-  // ── Gemini — tries all 5 free models, remembers which worked last ──
+  // ── Gemini — native API (more reliable than OpenAI-compat endpoint) ──
   async function callGemini(apiKey, system, messages, maxTokens) {
+    // Build Gemini-format contents array
     const contents = [];
+    // Gemini doesn't have a system role — prepend as first user/model turn
     if (system) {
       contents.push({ role: 'user',  parts: [{ text: system }] });
       contents.push({ role: 'model', parts: [{ text: 'Understood. I will follow these instructions.' }] });
@@ -165,116 +292,85 @@ const LLM = (() => {
       });
     });
 
-    // Start from last working model index
-    const startIdx = _modelIndex.gemini;
+    // Try gemini models
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
     let lastErr = null;
 
-    for (let i = 0; i < GEMINI_FREE_MODELS.length; i++) {
-      const idx = (startIdx + i) % GEMINI_FREE_MODELS.length;
-      const model = GEMINI_FREE_MODELS[idx];
+    for (const model of models) {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents,
-            generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
-            safetySettings: [
-              { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
-              { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
-              { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-              { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-            ],
-          }),
-        });
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents,
+          generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+          ],
+        }),
+      });
 
-        if (res.status === 429) {
-          // Rate limited — try next model
-          lastErr = new Error(`Gemini ${model} rate limited (429)`);
-          _modelIndex.gemini = (idx + 1) % GEMINI_FREE_MODELS.length;
-          continue;
-        }
-        if (res.status === 503 || res.status === 500) {
-          lastErr = new Error(`Gemini ${model} unavailable (${res.status})`);
-          _modelIndex.gemini = (idx + 1) % GEMINI_FREE_MODELS.length;
-          continue;
-        }
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({}));
-          lastErr = new Error(e.error?.message || `Gemini ${model} HTTP ${res.status}`);
-          continue;
-        }
-
-        const data = await res.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (!text) { lastErr = new Error(`Gemini ${model} returned empty response`); continue; }
-
-        // Remember this working model index
-        _modelIndex.gemini = idx;
-        return { text, provider: 'gemini', model };
-      } catch (e) {
-        lastErr = e;
+      if (res.status === 429) {
+        // Rate limited on this model — try next
+        lastErr = new Error(`Gemini ${model} rate limited (429) — try again in 60s or add Groq key`);
+        continue;
       }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        lastErr = new Error(e.error?.message || `Gemini ${model} HTTP ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      if (!text) { lastErr = new Error(`Gemini ${model} returned empty response`); continue; }
+      return { text, provider: 'gemini', model };
     }
 
-    throw lastErr || new Error('All Gemini free models exhausted');
+    throw lastErr || new Error('All Gemini models failed');
   }
 
-  // ── Groq — tries all 5 free models, continues from last working ──
+  // ── Groq ──
   async function callGroq(apiKey, system, messages, maxTokens) {
     const msgs = system ? [{ role: 'system', content: system }, ...messages] : messages;
-    const startIdx = _modelIndex.groq;
-    let lastErr = null;
-
-    for (let i = 0; i < GROQ_FREE_MODELS.length; i++) {
-      const idx = (startIdx + i) % GROQ_FREE_MODELS.length;
-      const model = GROQ_FREE_MODELS[idx];
-      try {
-        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-          body: JSON.stringify({ model, messages: msgs, max_tokens: maxTokens, temperature: 0.7 }),
-        });
-
-        if (res.status === 429) {
-          lastErr = new Error(`Groq ${model} rate limited (429)`);
-          _modelIndex.groq = (idx + 1) % GROQ_FREE_MODELS.length;
-          continue;
-        }
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({}));
-          lastErr = new Error(e.error?.message || `Groq ${model} HTTP ${res.status}`);
-          // Model may not exist on this account — try next
-          if (res.status === 404 || res.status === 400) {
-            _modelIndex.groq = (idx + 1) % GROQ_FREE_MODELS.length;
-          }
-          continue;
-        }
-
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content || '';
-        if (!text) { lastErr = new Error(`Groq ${model} returned empty response`); continue; }
-
-        _modelIndex.groq = idx;
-        return { text, provider: 'groq', model: data.model || model };
-      } catch (e) {
-        lastErr = e;
-      }
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: msgs, max_tokens: maxTokens, temperature: 0.7 }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      const msg = e.error?.message || `Groq HTTP ${res.status}`;
+      if (res.status === 429) throw new Error('Groq rate limited (429) — falling back to next provider');
+      throw new Error(msg);
     }
-
-    throw lastErr || new Error('All Groq free models exhausted');
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    if (!text) throw new Error('Groq returned empty response');
+    return { text, provider: 'groq', model: data.model || 'llama-3.3-70b-versatile' };
   }
 
-  // ── OpenRouter — tries all 5 free models, continues from last working ──
+  // ── OpenRouter — tries multiple free models until one works ──
+  const OPENROUTER_FREE_MODELS = [
+    'mistralai/mistral-7b-instruct:free',
+    'meta-llama/llama-3.2-3b-instruct:free',
+    'google/gemma-2-9b-it:free',
+    'qwen/qwen-2.5-7b-instruct:free',
+    'microsoft/phi-3-mini-128k-instruct:free',
+    'nvidia/nemotron-3-super-120b-a12b:free',
+    'openrouter/owl-alpha',
+    'openai/gpt-oss-120b:free',
+    'inclusionai/ring-2.6-1t:free',
+  ];
+
   async function callOpenRouter(apiKey, system, messages, maxTokens) {
     const msgs = system ? [{ role: 'system', content: system }, ...messages] : messages;
-    const startIdx = _modelIndex.openrouter;
     let lastErr = null;
 
-    for (let i = 0; i < OPENROUTER_FREE_MODELS.length; i++) {
-      const idx = (startIdx + i) % OPENROUTER_FREE_MODELS.length;
-      const model = OPENROUTER_FREE_MODELS[idx];
+    for (const model of OPENROUTER_FREE_MODELS) {
       try {
         const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
@@ -282,7 +378,7 @@ const LLM = (() => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,
             'HTTP-Referer': window.location.origin,
-            'X-Title': 'SAGE2',
+            'X-Title': 'SAGE',
           },
           body: JSON.stringify({ model, messages: msgs, max_tokens: maxTokens }),
         });
@@ -290,29 +386,20 @@ const LLM = (() => {
         if (!res.ok) {
           const e = await res.json().catch(() => ({}));
           const msg = e.error?.message || `HTTP ${res.status}`;
-          if (res.status === 429) {
-            lastErr = new Error(`OpenRouter ${model} rate limited (429)`);
-            _modelIndex.openrouter = (idx + 1) % OPENROUTER_FREE_MODELS.length;
-          } else {
-            lastErr = new Error(`OpenRouter ${model}: ${msg}`);
-            _modelIndex.openrouter = (idx + 1) % OPENROUTER_FREE_MODELS.length;
-          }
+          lastErr = new Error(`OpenRouter ${model}: ${res.status === 429 ? 'rate limited (429)' : msg}`);
           continue;
         }
 
         const data = await res.json();
         const text = data.choices?.[0]?.message?.content || '';
         if (!text) { lastErr = new Error(`OpenRouter ${model}: empty response`); continue; }
-
-        _modelIndex.openrouter = idx;
         return { text, provider: 'openrouter', model };
       } catch (e) {
         lastErr = e;
-        _modelIndex.openrouter = (idx + 1) % OPENROUTER_FREE_MODELS.length;
       }
     }
 
-    throw lastErr || new Error('All OpenRouter free models exhausted');
+    throw lastErr || new Error('All OpenRouter free models failed');
   }
 
   // ── Test a specific provider key ──
@@ -325,32 +412,23 @@ const LLM = (() => {
       else                           result = await callOpenRouter(apiKey, null, testMsg, 30);
       return { success: true, response: result.text.trim().slice(0, 80), model: result.model };
     } catch (e) {
+      // Make error messages more human-readable
       let msg = e.message;
       if (msg.includes('429'))        msg = 'Rate limited — wait 60 seconds and try again';
       if (msg.includes('401'))        msg = 'Invalid API key — double-check you copied it correctly';
       if (msg.includes('403'))        msg = 'Access denied — your account may need verification';
       if (msg.includes('empty'))      msg = 'Key works but model returned empty — try again';
+      if (msg.includes('Provider'))   msg = 'Upstream model unavailable — trying next free model...';
       return { success: false, error: msg };
     }
   }
 
-  // Reset model indices at the start of a new session
-  function resetModelIndices() {
-    _modelIndex.gemini = 0;
-    _modelIndex.groq = 0;
-    _modelIndex.openrouter = 0;
-  }
-
+  // ── Active provider name (for status bar) ──
   function activeProviderLabel() {
     const mode = getProviderMode();
     if (mode === 'auto') return '🤖 Auto';
     return providerModeLabel(mode);
   }
 
-  return {
-    chat, chatHyper, testKey, activeProviderLabel, resetModelIndices,
-    IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode,
-    providerModeLabel, resolveProviderOrder,
-    GEMINI_FREE_MODELS, GROQ_FREE_MODELS, OPENROUTER_FREE_MODELS,
-  };
+  return { chat, chatMultiProvider, isConsensusMode, setConsensusMode, testKey, activeProviderLabel, IS_LOCAL, PROVIDER_INFO, getProviderMode, setProviderMode, providerModeLabel, resolveProviderOrder };
 })();
