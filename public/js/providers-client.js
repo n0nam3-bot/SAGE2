@@ -86,11 +86,24 @@ const LLM = (() => {
       .filter(Boolean);
 
     if (successes.length === 0) throw new Error('All providers failed in consensus mode');
-    if (successes.length === 1) return { text: successes[0].text, provider: successes[0].provider, model: successes[0].model, consensus: false };
+    if (successes.length === 1) return {
+      text: successes[0].text,
+      provider: successes[0].provider,
+      model: successes[0].model,
+      consensus: false,
+      providerOutputs: successes,
+    };
 
-    // Merge the responses
+    // Merge the responses for the agent to read, but preserve every provider output
     const merged = mergeProviderResponses(successes);
-    return { text: merged, provider: `consensus(${successes.map(s=>s.provider).join('+')})`, model: 'multi', consensus: true, providerCount: successes.length };
+    return {
+      text: merged,
+      provider: `consensus(${successes.map(s=>s.provider).join('+')})`,
+      model: 'multi',
+      consensus: true,
+      providerCount: successes.length,
+      providerOutputs: successes,
+    };
   }
 
   // Merge multiple JSON responses from different providers into one unified result.
