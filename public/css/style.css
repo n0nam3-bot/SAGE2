@@ -1581,25 +1581,64 @@ body {
 
 
 .hyper-toggle-btn {
+  position: relative;
+  overflow: hidden;
   padding: 10px 14px;
   border-radius: 999px;
   border: 1px solid rgba(148,163,184,0.35);
-  background: rgba(15,23,42,0.92);
+  background: linear-gradient(180deg, rgba(30,41,59,0.98) 0%, rgba(15,23,42,0.96) 55%, rgba(2,6,23,0.98) 100%);
   color: #e2e8f0;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.45);
   box-shadow: 0 0 0 rgba(34,211,238,0);
-  transition: transform .18s ease, box-shadow .2s ease, border-color .2s ease, background .2s ease;
+  transition: transform .18s ease, box-shadow .2s ease, border-color .2s ease, background .2s ease, filter .2s ease;
 }
 .hyper-toggle-btn:hover { transform: translateY(-1px); }
 .hyper-toggle-btn.hyper-on {
-  border-color: rgba(250, 204, 21, 0.9);
-  box-shadow: 0 0 18px rgba(250, 204, 21, 0.55), 0 0 44px rgba(236, 72, 153, 0.28), inset 0 0 18px rgba(255,255,255,0.08);
-  animation: hyperPulse 1.4s ease-in-out infinite;
+  border-color: rgba(255, 204, 102, 0.95);
+  background: linear-gradient(180deg, rgba(255, 221, 102, 0.98) 0%, rgba(255, 140, 0, 0.96) 45%, rgba(122, 21, 0, 0.98) 100%);
+  color: #fff7ed;
+  text-shadow: 0 0 10px rgba(255,255,255,0.22), 0 0 16px rgba(255,153,0,0.55);
+  box-shadow: 0 0 18px rgba(255, 115, 0, 0.62), 0 0 44px rgba(255, 64, 0, 0.35), inset 0 0 20px rgba(255,255,255,0.18);
+  animation: hyperFire 0.85s ease-in-out infinite, hyperFlicker 0.18s steps(2, end) infinite;
 }
-@keyframes hyperPulse {
-  0%, 100% { filter: saturate(1.0); }
-  50% { filter: saturate(1.35) brightness(1.08); }
+.hyper-toggle-btn.hyper-on::before {
+  content: '';
+  position: absolute;
+  inset: -8px -12px auto -12px;
+  height: 22px;
+  background: radial-gradient(ellipse at center, rgba(255,255,255,0.58) 0%, rgba(255,191,0,0.55) 26%, rgba(255,102,0,0.32) 55%, transparent 75%);
+  filter: blur(2px);
+  opacity: .95;
+  transform: translateY(-20%);
+  pointer-events: none;
+}
+.hyper-toggle-btn.hyper-on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 0%, rgba(255,255,255,0.12) 18%, transparent 36%, rgba(255,255,255,0.08) 56%, transparent 72%);
+  transform: translateX(-120%);
+  animation: hyperSweep 1.35s linear infinite;
+  pointer-events: none;
+}
+@keyframes hyperFire {
+  0%, 100% { transform: translateY(0) scale(1); filter: saturate(1.1) brightness(1.0); }
+  50% { transform: translateY(-1px) scale(1.02); filter: saturate(1.35) brightness(1.14); }
+}
+@keyframes hyperFlicker {
+  0% { box-shadow: 0 0 14px rgba(255, 94, 0, 0.56), 0 0 32px rgba(255, 196, 0, 0.26), inset 0 0 14px rgba(255,255,255,0.12); }
+  100% { box-shadow: 0 0 22px rgba(255, 128, 0, 0.72), 0 0 48px rgba(255, 60, 0, 0.36), inset 0 0 20px rgba(255,255,255,0.18); }
+}
+@keyframes hyperSweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+.hyper-status {
+  color: #fde68a;
+  font-weight: 800;
+  text-shadow: 0 0 10px rgba(245, 158, 11, 0.28);
 }
 .agents-agree.agree-strong {
   border-color: rgba(250, 204, 21, 0.5);
