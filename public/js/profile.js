@@ -530,7 +530,7 @@ const Profile = (() => {
   }
 
   return {
-    saveKeys, testKey, testOddsKey, authorizeSheets, checkOAuthCallback, getSheetsToken,
+    saveKeys, testKey, testOddsKey, testAppsScript, authorizeSheets, checkOAuthCallback, getSheetsToken,
     exportProfile, showImport, doImport,
     showChangePassword, doChangePassword, showDeleteAccount, doDeleteAccount,
     logout, showAuthScreen, showApp, doLogin, doRegister, openProfileModal,
