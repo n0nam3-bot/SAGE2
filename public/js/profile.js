@@ -133,6 +133,12 @@ const Profile = (() => {
       persistProfileField('apps_script_url', keys.apps_script_url);
       localStorage.setItem('sage_sheet_id', keys.sheet_id || '');
       if (keys.apps_script_url) globalThis.SheetsClient?.setAppsScriptUrl?.(keys.apps_script_url);
+      const state = globalThis._sageState || { sheetsStatus: {} };
+      if (keys.apps_script_url) {
+        state.sheetsStatus = { ...(state.sheetsStatus || {}), authorized: true, appsScriptConfigured: true };
+        globalThis._sageState = state;
+        UI.updateStatus?.(state);
+      }
       UI.showToast('Keys saved and encrypted ✅', 'success');
       document.getElementById('save-password').value = '';
       // Update status bar
@@ -278,14 +284,11 @@ const Profile = (() => {
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        // Refresh status bar
-        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
-        document.querySelectorAll('.status-item').forEach(el => {
-          if (el.textContent.includes('Sheets')) {
-            el.className = 'status-item ok';
-            el.innerHTML = '✅ Sheets';
-          }
-        });
+        // Refresh status bar immediately
+        const state = globalThis._sageState || { sheetsStatus: {} };
+        state.sheetsStatus = { ...(state.sheetsStatus || {}), authorized: true, appsScriptConfigured: true };
+        globalThis._sageState = state;
+        UI.updateStatus?.(state);
       } else if (text.includes('script.google.com') || text.includes('<!DOCTYPE')) {
         if (statusEl) {
           statusEl.textContent = '⚠️ Got HTML instead of JSON — deployment may need "Execute as: Me" and "Who has access: Anyone"';
@@ -530,7 +533,7 @@ const Profile = (() => {
   }
 
   return {
-    saveKeys, testKey, testOddsKey, authorizeSheets, checkOAuthCallback, getSheetsToken,
+    saveKeys, testKey, testOddsKey, testAppsScript, authorizeSheets, checkOAuthCallback, getSheetsToken,
     exportProfile, showImport, doImport,
     showChangePassword, doChangePassword, showDeleteAccount, doDeleteAccount,
     logout, showAuthScreen, showApp, doLogin, doRegister, openProfileModal,
