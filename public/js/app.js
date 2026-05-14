@@ -127,6 +127,8 @@ const SAGE = (() => {
       });
       UI.showFetchSummary?.('trading', feedResult);
 
+      if (!isForeground()) throw new Error('Trading session paused because the tab is no longer active.');
+
       // Step 2: Run the debate with auto-fetched context
       const result = await DebateEngine.runTradingDebate(
         { marketContext: feedResult.context },
@@ -183,6 +185,8 @@ const SAGE = (() => {
       const sportsMode = document.getElementById('sports-date-mode')?.value || 'day';
       const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, mode: sportsMode, activeScreen: isForeground() });
 
+      if (!isForeground()) throw new Error('Sports session paused because the tab is no longer active.');
+
       if (!feedResult.hasOdds) {
         UI.showToast('⚠️ No Odds API key — add one free in Profile for real moneylines', 'warning');
       }
@@ -195,7 +199,7 @@ const SAGE = (() => {
 
       // Step 2: Run the debate
       const result = await DebateEngine.runSportsDebate(
-        { gamesContext: feedResult.context },
+        { gamesContext: feedResult.context, scheduleIndex: feedResult.scheduleIndex || [] },
         (progress) => UI.updateProgress(progress)
       );
       state.lastSportsSession = result;
@@ -253,35 +257,56 @@ const SAGE = (() => {
   // ── Run autoresearch on weakest agent ──
   async function runAutoresearch(domain) {
     if (!requireForeground('Autoresearch')) return;
-    UI.showToast('Starting autoresearch...', 'info');
-    const result = await AgentManager.triggerAutoresearch(domain);
-    if (result.success) {
-      UI.showToast(`Autoresearch: shadow mode started for ${result.agentName}`, 'success');
+    const domains = domain === 'all' ? ['trading', 'sports'] : [domain];
+    const outcomes = [];
+
+    for (const d of domains) {
+      const result = await AgentManager.triggerAutoresearch(d);
+      outcomes.push({ domain: d, ...result });
+    }
+
+    const successes = outcomes.filter(r => r.success);
+    if (successes.length) {
+      UI.showToast(`Autoresearch started for ${successes.map(r => r.domain).join(' & ')}`, 'success');
       UI.renderAgents();
     } else {
-      UI.showToast('Autoresearch: ' + result.reason, 'warning');
+      UI.showToast('Autoresearch: ' + (outcomes.map(r => r.reason).filter(Boolean).join(' | ') || 'No agents with enough data'), 'warning');
     }
+    return domain === 'all' ? outcomes : outcomes[0];
   }
 
   // ── Detect blind spots ──
   async function runBlindSpotDetection(domain) {
     if (!requireForeground('Blind spot scan')) return;
+    const domains = domain === 'all' ? ['trading', 'sports'] : [domain];
+    const allSpots = [];
     UI.showToast('Scanning for blind spots...', 'info');
-    const spots = await AgentManager.detectBlindSpots(domain);
-    const spawnCheck = await AgentManager.checkSpawnCondition(domain);
 
-    if (spawnCheck?.shouldSpawn) {
-      const confirmed = window.confirm(`SAGE detected a repeated blind spot pattern:\n\n"${spawnCheck.suggestion}"\n\nSpawn a new specialist agent?`);
-      if (confirmed) {
-        const newAgent = await AgentManager.spawnAgent(domain, spawnCheck.suggestion, 'blind spot detection');
-        if (newAgent) UI.showToast(`New agent spawned: ${newAgent.name}`, 'success');
+    for (const d of domains) {
+      const spots = await AgentManager.detectBlindSpots(d);
+      allSpots.push(...spots.map(s => ({ domain: d, ...s })));
+      const spawnCheck = await AgentManager.checkSpawnCondition(d);
+
+      if (spawnCheck?.shouldSpawn) {
+        const confirmed = window.confirm(`SAGE detected a repeated blind spot pattern for ${d}:
+
+"${spawnCheck.suggestion}"
+
+Spawn a new specialist agent?`);
+        if (confirmed) {
+          const newAgent = await AgentManager.spawnAgent(d, spawnCheck.suggestion, 'blind spot detection');
+          if (newAgent) UI.showToast(`New agent spawned: ${newAgent.name}`, 'success');
+        }
       }
-    } else if (spots.length > 0) {
-      UI.showToast(`Found ${spots.length} blind spot(s). Check agent cards.`, 'warning');
+    }
+
+    if (allSpots.length > 0) {
+      UI.showToast(`Found ${allSpots.length} blind spot(s). Check agent cards.`, 'warning');
     } else {
       UI.showToast('No new blind spots detected.', 'info');
     }
     UI.renderAgents();
+    return allSpots;
   }
 
   // ── Record outcome for a pick ──
