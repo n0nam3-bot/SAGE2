@@ -102,7 +102,7 @@ const SheetsClient = (() => {
       // Try Apps Script webhook first (no OAuth needed, cross-device)
       const scriptUrl = getAppsScriptUrl();
       if (scriptUrl) {
-        await appendViaAppsScript(scriptUrl, tab, rows);
+        await appendViaAppsScript(scriptUrl, tab, rows, { username: currentUsername() });
         return;
       }
       // Fallback to direct API with OAuth token
@@ -113,8 +113,8 @@ const SheetsClient = (() => {
   }
 
   // ── Apps Script webhook append ──
-  async function appendViaAppsScript(scriptUrl, tab, rows) {
-    const payload = { action: 'append', tab, rows };
+  async function appendViaAppsScript(scriptUrl, tab, rows, extra = {}) {
+    const payload = { action: 'append', tab, rows, username: currentUsername(), ...extra };
     // Apps Script requires no-cors or JSONP; use fetch with mode no-cors
     // and send data via URL params for GETs or form POST
     await fetch(scriptUrl, {
@@ -175,7 +175,7 @@ const SheetsClient = (() => {
       }
       const scriptUrl = getAppsScriptUrl();
       if (scriptUrl) {
-        await appendViaAppsScript(scriptUrl, 'Agent Performance', [row]);
+        await appendViaAppsScript(scriptUrl, 'Agent Performance', [row], { username: currentUsername(), action: 'upsert_agent' });
         return;
       }
       await appendRowsDirect('Agent Performance', [row]);
