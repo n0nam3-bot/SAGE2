@@ -35,6 +35,44 @@ const DataFeeds = (() => {
   function isFreshTimestamp(iso, maxAgeMs = ODDS_CACHE_TTL_MS) { if (!iso) return false; const ts = Date.parse(iso); return Number.isFinite(ts) && (Date.now() - ts) < maxAgeMs; }
   function normalizeOddPrice(price) { if (price == null || price === '') return null; const n = Number(String(price).replace(/[^\d+\-]/g, '')); return Number.isFinite(n) ? n : null; }
 
+  function normalizeName(str) {
+    return String(str || '')
+      .toLowerCase()
+      .replace(/\(.*?\)/g, ' ')
+      .replace(/\bgame\s*\d+\b/gi, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function extractGameTeams(gameText) {
+    const cleaned = String(gameText || '')
+      .replace(/\(.*?\)/g, ' ')
+      .replace(/\bgame\s*\d+\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const parts = cleaned.split(/\s+(?:@|vs\.?|v\.?|at)\s+/i).map(s => s.trim()).filter(Boolean);
+    return parts.length >= 2 ? parts.slice(0, 2) : [];
+  }
+
+  function buildGameKey(a, b) {
+    const teams = [normalizeName(a), normalizeName(b)].filter(Boolean).sort();
+    return teams.join('|');
+  }
+
+  function buildGameKeyFromText(gameText) {
+    const teams = extractGameTeams(gameText);
+    if (teams.length >= 2) return buildGameKey(teams[0], teams[1]);
+    return normalizeName(gameText);
+  }
+
+  function isUpcomingScheduleEntry(entry, nowMs = Date.now()) {
+    const start = Date.parse(entry?.startTime || entry?.commenceTime || '');
+    if (!Number.isFinite(start)) return entry?.statusState === 'pre';
+    const bufferMs = 10 * 60 * 1000;
+    return entry?.statusState === 'pre' && start > (nowMs + bufferMs);
+  }
+
 
   function buildSportsDateLabel(pickedDate, mode) {
     const d = new Date(`${pickedDate}T00:00:00`);
@@ -112,7 +150,7 @@ const DataFeeds = (() => {
         status: detail,
         statusState: state,
         startTime: Number.isFinite(start.getTime()) ? start.toISOString() : '',
-        time: detail && state !== 'pre' ? detail : time,
+        time,
         venue: comps?.venue?.fullName || '',
       };
     });
@@ -373,8 +411,13 @@ const DataFeeds = (() => {
       { games: nhlGames, name: 'NHL' },
     ];
 
-    const upcomingOnly = games => (Array.isArray(games) ? games : []).filter(g => (g.statusState || 'pre') === 'pre' && !!g.awayTeam && !!g.homeTeam);
+    const upcomingOnly = games => (Array.isArray(games) ? games : []).filter(g => {
+      const match = (g.statusState || 'pre') === 'pre' && !!g.awayTeam && !!g.homeTeam;
+      const startMs = Date.parse(g.startTime || '');
+      return match && (!Number.isFinite(startMs) || startMs > (Date.now() + 10 * 60 * 1000));
+    });
 
+    const scheduleIndex = [];
     let hasSchedule = false;
     for (const { games, name } of scheduleMap) {
       const upcomingGames = upcomingOnly(games);
@@ -385,10 +428,23 @@ const DataFeeds = (() => {
         const record = g.awayRecord && g.homeRecord ? ` (${g.awayRecord} vs ${g.homeRecord})` : '';
         const when = g.time || 'TBD';
         lines.push(`${g.awayTeam} @ ${g.homeTeam}${record} — ${when}`);
+        scheduleIndex.push({
+          sport: name,
+          game: `${g.awayTeam} @ ${g.homeTeam}`,
+          awayTeam: g.awayTeam,
+          homeTeam: g.homeTeam,
+          event_date: pickedDate,
+          game_time: g.time || '',
+          startTime: g.startTime || '',
+          statusState: g.statusState || 'pre',
+          matchKey: buildGameKey(g.awayTeam, g.homeTeam),
+          shortName: g.shortName || g.name || '',
+        });
       });
       fetched.push(`${name} schedule`);
     }
 
+    lines.push('\n=== SCHEDULE RULES ===\nOnly the upcoming games below are eligible. Ignore any live, in-progress, postponed, or already-started game even if an agent mentions it. Game times are authoritative and locked to ESPN schedule data.\n');
     // ── Real odds from The Odds API ──
     if (oddsKey) {
       const oddsSports = [
