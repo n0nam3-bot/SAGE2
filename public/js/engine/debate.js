@@ -463,7 +463,51 @@ Provide your picks in the specified JSON format.`;
     return results;
   }
 
+
+  function normalizeReviewScore(entry) {
+    const score = Number(entry?.score ?? entry?.risk_score ?? entry?.rating ?? entry?.confidence ?? entry?.quality ?? 0);
+    return Number.isFinite(score) ? score : 0;
+  }
+
+  function applySportsScoredReview(scoredItems, picks) {
+    const reviewed = [];
+    for (const item of Array.isArray(scoredItems) ? scoredItems : []) {
+      const rawPick = item?.pick || item?.approved_pick || item?.bet || item?.original_bet || item;
+      const normalized = normalizeSportsPick(rawPick) || normalizeSportsPick(item);
+      if (!normalized) continue;
+      const score = normalizeReviewScore(item);
+      if (score < 6.5) continue;
+      const next = { ...normalized, review_score: score };
+      if (score < 7) next.units = Math.min(Number(next.units) || 1, 0.5);
+      reviewed.push(next);
+    }
+    return consolidateSportsFinalPicks(normalizeSportsFinalPicks(reviewed));
+  }
+
+  function applyTradingScoredReview(scoredItems, picks) {
+    const reviewed = [];
+    for (const item of Array.isArray(scoredItems) ? scoredItems : []) {
+      const raw = item?.idea || item?.pick || item?.approved_idea || item?.original_idea || item;
+      const score = normalizeReviewScore(item);
+      const normalized = typeof raw === 'object' ? raw : { ticker: raw?.ticker || raw?.symbol || raw?.name || String(raw || ''), ...item };
+      const ticker = String(normalized.ticker || normalized.symbol || normalized.name || '').trim();
+      if (!ticker) continue;
+      if (score < 6.5) continue;
+      const next = { ...normalized, review_score: score };
+      if (score < 7) {
+        if (Number.isFinite(Number(next.size_pct))) next.size_pct = Math.round((Number(next.size_pct) * 0.5) * 1000) / 1000;
+        if (Number.isFinite(Number(next.position_size_pct))) next.position_size_pct = Math.round((Number(next.position_size_pct) * 0.5) * 1000) / 1000;
+      }
+      reviewed.push(next);
+    }
+    return reviewed;
+  }
+
   function applySportsFinalReview(picks, reviewParsed) {
+    const scored = reviewParsed?.scored_picks || reviewParsed?.scored || reviewParsed?.scored_items;
+    if (Array.isArray(scored) && scored.length) {
+      return applySportsScoredReview(scored, picks);
+    }
     const approved = reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.final_picks || reviewParsed?.finalPicks;
     if (Array.isArray(approved) && approved.length) {
       return consolidateSportsFinalPicks(normalizeSportsFinalPicks(approved));
@@ -476,6 +520,10 @@ Provide your picks in the specified JSON format.`;
   }
 
   function applyTradingFinalReview(picks, reviewParsed) {
+    const scored = reviewParsed?.scored_ideas || reviewParsed?.scored_picks || reviewParsed?.scored || reviewParsed?.scored_items;
+    if (Array.isArray(scored) && scored.length) {
+      return applyTradingScoredReview(scored, picks);
+    }
     const approved = reviewParsed?.approved_ideas || reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.top_ideas;
     if (Array.isArray(approved) && approved.length) {
       return approved;
@@ -943,11 +991,11 @@ Provide your picks in the specified JSON format.`;
     if (!LLM.isHyperMode?.()) return picks;
     const role = domain === 'trading' ? 'Senior Hedge Fund Risk Manager' : 'Professional Sports Bettor';
     const prompt = domain === 'trading'
-      ? `You are the final ${role}. Review the approved trading ideas below and remove anything redundant, unsupported, too correlated, or weakly justified. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Preserve only the best ideas.
+      ? `You are the final ${role}. Review the approved trading ideas below and score every idea from 0 to 10 using correlation, liquidity, tail-risk, and Kelly discipline. Output STRICT JSON as {"scored_ideas": [...], "approved_ideas": [...], "rejected_ideas": [...], "notes": ""}. Reject anything below 6.5 and reduce anything from 6.5 to 6.9 by at least 50%. Preserve only the best ideas.
 
 Context:
 ${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`
-      : `You are the final ${role}. Review the approved sports picks below and remove any live games, TBD times, duplicates, weak edges, or anything that failed the checks. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Keep one pick per unique game/market/side and preserve agreement metadata.
+      : `You are the final ${role}. Review the approved sports picks below and score every pick from 0 to 10 using CLV, juice, trap-game risk, sample size, injury confirmation, and narrative-trap checks. Output STRICT JSON as {"scored_picks": [...], "approved_picks": [...], "rejected_picks": [...], "notes": ""}. Reject anything below 6.5 and reduce anything from 6.5 to 6.9 to 0.5u. Keep one pick per unique game/market/side and preserve agreement metadata.
 
 Context:
 ${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`;
