@@ -35,6 +35,7 @@ const TABS = {
   AGENTS:  'Agent Performance',
   EQUITY:  'Equity Curve',
   LOG:     'Sync Log',
+  FRESH_ODDS: 'Fresh Odds',
 };
 
 // ── Column headers for each tab ──
@@ -64,6 +65,10 @@ const HEADERS = {
   ],
   [TABS.LOG]: [
     'Timestamp', 'Action', 'Tab', 'Rows', 'Device', 'Status',
+  ],
+  [TABS.FRESH_ODDS]: [
+    'Fetched At', 'Sport', 'Away', 'Home', 'Commence Time',
+    'Away ML', 'Home ML', 'Spread', 'Total', 'Book', 'Range From', 'Range To',
   ],
 };
 
@@ -173,7 +178,7 @@ function doPost(e) {
   }
 
   const { action, tab, rows, row } = payload;
-  const device = e?.parameter?.device || 'unknown';
+  const user = String(payload?.username || e?.parameter?.username || e?.parameter?.device || 'global').toLowerCase();
 
   try {
     // Ensure tabs exist on first write
@@ -182,14 +187,21 @@ function doPost(e) {
     if (action === 'append') {
       if (!tab || !rows) return jsonResponse({ success: false, error: 'tab and rows required' });
       const count = appendRows(tab, rows);
-      writeLog('append', tab, count, device, 'ok');
+      writeLog('append', tab, count, user, 'ok');
       return jsonResponse({ success: true, action: 'append', tab, rowsAdded: count });
+    }
+
+    if (action === 'overwrite') {
+      if (!tab) return jsonResponse({ success: false, error: 'tab required for overwrite' });
+      overwriteRows(tab, rows || []);
+      writeLog('overwrite', tab, (rows || []).length, user, 'ok');
+      return jsonResponse({ success: true, action: 'overwrite', tab, rowsAdded: (rows || []).length });
     }
 
     if (action === 'upsert_agent') {
       if (!row) return jsonResponse({ success: false, error: 'row required for upsert_agent' });
       upsertAgentRow(row);
-      writeLog('upsert_agent', TABS.AGENTS, 1, device, 'ok');
+      writeLog('upsert_agent', TABS.AGENTS, 1, user, 'ok');
       return jsonResponse({ success: true, action: 'upsert_agent' });
     }
 
@@ -197,14 +209,14 @@ function doPost(e) {
       // payload: { action, tab, sessionId, identifier, outcome: "win"|"loss", pnl }
       const { sessionId, identifier, outcome, pnl } = payload;
       markOutcome(tab || TABS.SPORTS, sessionId, identifier, outcome, pnl);
-      writeLog('mark_outcome', tab, 1, device, 'ok');
+      writeLog('mark_outcome', tab, 1, user, 'ok');
       return jsonResponse({ success: true, action: 'mark_outcome' });
     }
 
     return jsonResponse({ success: false, error: 'Unknown action: ' + action });
 
   } catch (err) {
-    writeLog(action || 'unknown', tab || '?', 0, device, 'error: ' + err.message);
+    writeLog(action || 'unknown', tab || '?', 0, user, 'error: ' + err.message);
     return jsonResponse({ success: false, error: err.message });
   }
 }
@@ -236,6 +248,31 @@ function appendRows(tabName, rows) {
   // Apply alternating row colors for readability
   applyRowFormatting(sheet, lastRow + 1, rows.length, tabName);
 
+  SpreadsheetApp.flush();
+  return rows.length;
+}
+
+function overwriteRows(tabName, rows) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(tabName);
+  if (!sheet) {
+    sheet = ss.insertSheet(tabName);
+    const headers = HEADERS[tabName];
+    if (headers) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      formatHeaderRow(sheet, headers.length);
+      sheet.setFrozenRows(1);
+    }
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn() || 1).clearContent().clearFormat();
+  }
+  if (!rows || !rows.length) return 0;
+  const numCols = Math.max(...rows.map(r => r.length));
+  sheet.getRange(2, 1, rows.length, numCols).setValues(rows);
+  applyRowFormatting(sheet, 2, rows.length, tabName);
   SpreadsheetApp.flush();
   return rows.length;
 }
@@ -325,7 +362,7 @@ function markOutcome(tabName, sessionId, identifier, outcome, pnl) {
   SpreadsheetApp.flush();
 }
 
-function writeLog(action, tab, rows, device, status) {
+function writeLog(action, tab, rows, user, status) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     let logSheet = ss.getSheetByName(TABS.LOG);
@@ -335,10 +372,20 @@ function writeLog(action, tab, rows, device, status) {
       formatHeaderRow(logSheet, HEADERS[TABS.LOG].length);
       logSheet.setFrozenRows(1);
     }
+
+    const values = [new Date().toISOString(), action, tab, rows, user || 'global', status];
     const lastRow = logSheet.getLastRow();
-    logSheet.getRange(lastRow + 1, 1, 1, 6).setValues([[
-      new Date().toISOString(), action, tab, rows, device, status
-    ]]);
+    if (lastRow > 1) {
+      const rowsData = logSheet.getRange(2, 1, lastRow - 1, logSheet.getLastColumn()).getValues();
+      const idx = rowsData.findIndex(r => String(r[4] || '').toLowerCase() === String(user || 'global').toLowerCase() && String(r[2] || '') === String(tab || ''));
+      if (idx >= 0) {
+        logSheet.getRange(idx + 2, 1, 1, values.length).setValues([values]);
+        SpreadsheetApp.flush();
+        return;
+      }
+    }
+
+    logSheet.getRange(lastRow + 1, 1, 1, values.length).setValues([values]);
   } catch (e) {
     Logger.log('Log write error: ' + e.message);
   }
