@@ -287,6 +287,30 @@ const SheetsClient = (() => {
     await appendRows('Sports Picks', rows);
   }
 
+
+  async function logFreshOddsSnapshot({ sportKey, sportName, fetchedAt, rows, range }) {
+    try {
+      const tab = 'Fresh Odds';
+      const rowPayloads = (rows || []).map(r => [
+        fetchedAt,
+        sportName || sportKey || '',
+        r.away || '',
+        r.home || '',
+        r.commenceTime || '',
+        r.awayML || '',
+        r.homeML || '',
+        r.spread || '',
+        r.total ?? '',
+        r.book || '',
+        range?.from || '',
+        range?.to || '',
+      ]);
+      await appendRows(tab, rowPayloads);
+    } catch (err) {
+      console.warn('[Sheets] log fresh odds failed:', err.message);
+    }
+  }
+
   async function syncAgentPerformance(agents) {
     for (const agent of agents) {
       const acc = agent.stats?.predictions > 0
@@ -337,7 +361,7 @@ const SheetsClient = (() => {
   return {
     checkStatus, authorize,
     logTradingSession, logSportsSession,
-    syncAgentPerformance, logEquityPoint,
+    logFreshOddsSnapshot, syncAgentPerformance, logEquityPoint,
     loadSportsPicks, loadTradingPicks,
     getAppsScriptUrl, setAppsScriptUrl,
     appendViaAppsScript,
