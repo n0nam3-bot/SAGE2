@@ -269,6 +269,13 @@ const SheetsClient = (() => {
       const implied = odds < 0
         ? (Math.abs(odds) / (Math.abs(odds) + 100) * 100).toFixed(1)
         : odds > 0 ? (100 / (odds + 100) * 100).toFixed(1) : '';
+      const agreementCell =
+        pick.agreement_breakdown
+        || (Array.isArray(pick.agreement_sources) ? pick.agreement_sources.join(' | ') : '')
+        || (Array.isArray(pick.agreement_llms) && Array.isArray(pick.agreement_agent_ids)
+          ? pick.agreement_llms.map((llm, i) => `${llm}: ${pick.agreement_agent_ids?.[i] || ''}`).filter(Boolean).join(' | ')
+          : '')
+        || (pick.agents_in_agreement || []).join(', ');
       return [
         date, session,
         pick.source_agent || pick.source_agent_name || 'Sports CIO',
@@ -281,7 +288,7 @@ const SheetsClient = (() => {
         pick.units ?? pick.stake_units ?? 1,
         '', '', '', '',   // outcome, P&L, ROI, weight (filled later)
         pick.full_reasoning || pick.reasoning || '',
-        (pick.agents_in_agreement || []).join(', '),  // (NEW)
+        agreementCell,
       ];
     });
     await appendRows('Sports Picks', rows);
