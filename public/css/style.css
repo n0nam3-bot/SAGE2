@@ -1547,3 +1547,34 @@ body {
   border-radius: 6px; font-size: 11px; white-space: pre-wrap;
   color: var(--accent-cyan); overflow-x: auto;
 }
+
+
+/* ───────────────────────────────────────
+   MOBILE TWEAKS
+──────────────────────────────────────── */
+@media (max-width: 900px) {
+  .app-header { padding: 0 14px; }
+  .tab-nav { padding: 0 12px; }
+  .tab-pane { padding: 14px 12px; }
+  .agents-header, .agent-header-actions, .perf-grid { gap: 10px; }
+  .agents-header { align-items: flex-start; }
+  .agent-header-actions { flex-wrap: wrap; }
+  .agent-header-actions .btn-sm,
+  .agent-header-actions .btn-primary { width: 100%; }
+  .perf-grid { display: grid; grid-template-columns: 1fr; }
+  .session-panel { grid-template-columns: 1fr; }
+  .session-controls { order: 1; }
+  .session-results { order: 2; }
+}
+
+@media (max-width: 700px) {
+  .logo-text { font-size: 16px; }
+  .header-right { gap: 6px; }
+  .provider-select { min-width: 88px; max-width: 120px; font-size: 11px; }
+  .user-btn { padding: 6px 8px; font-size: 12px; }
+  .tab-btn { padding: 0 8px; font-size: 11px; }
+  .agent-table, .leaderboard-table { min-width: 820px; }
+  .agent-table thead th, .leaderboard-table thead th { font-size: 11px; padding: 8px 6px; }
+  .agent-table tbody td, .leaderboard-table tbody td { padding: 8px 6px; font-size: 12px; }
+  .agents-header h2, .perf-section h3, .equity-section h3, .weight-evolution h3 { font-size: 16px; }
+}
