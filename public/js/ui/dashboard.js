@@ -740,17 +740,11 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const hyperOn = LLM.isHyperMode?.();
     const hyperBtn = document.getElementById('hyper-toggle-btn');
     if (hyperBtn) hyperBtn.classList.toggle('hyper-on', !!hyperOn);
-    const keys = Auth?.getKeys?.() || {};
-    const activeProviders = ['gemini','groq','openrouter'].filter(p => !!keys[p]);
+
+    const statusLabel = hyperOn ? '🔥 HYPER MODE ON' : LLM.activeProviderLabel();
 
     el.innerHTML = `
-      <span class="status-item ok">${LLM.activeProviderLabel()}</span>
-      ${activeProviders.length > 0 ? `
-        <span class="status-item" style="cursor:pointer"
-          onclick="LLM.toggleHyperMode(); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isHyperMode() ? 'Hyper mode ON — all providers and models vote together' : 'Hyper mode OFF', 'info');"
-          title="Toggle hyper mode">
-          ⚡ Hyper (${activeProviders.length} keys)
-        </span>` : ''}
+      <span class="status-item ${hyperOn ? 'hyper-status ok' : 'ok'}">${statusLabel}</span>
       <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal?.()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
