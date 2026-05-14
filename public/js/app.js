@@ -12,6 +12,25 @@ const SAGE = (() => {
     regimes: { trading: 'bull', sports: 'mid_season' },
   };
 
+  function isForeground() {
+    try {
+      return document.visibilityState === 'visible' && document.hasFocus();
+    } catch {
+      return true;
+    }
+  }
+
+  function requireForeground(actionLabel = 'This action') {
+    if (isForeground()) return true;
+    UI.showToast(`${actionLabel} is paused while this tab is in the background.`, 'warning');
+    return false;
+  }
+
+  function setActiveTab(tab) {
+    state.activeTab = tab;
+    window._sageState = state;
+  }
+
   // ── Boot (called after successful login) ──
   async function init() {
     console.log('🧠 SAGE initializing...');
@@ -77,6 +96,13 @@ const SAGE = (() => {
     if (sportsMode) sportsMode.value = localStorage.getItem('sage_sports_date_mode') || 'day';
     state.initialized = true;
 
+    if (!window.__sageFocusListenersAdded) {
+      window.__sageFocusListenersAdded = true;
+      document.addEventListener('visibilitychange', () => UI.updateStatus(window._sageState || state));
+      window.addEventListener('focus', () => UI.updateStatus(window._sageState || state));
+      window.addEventListener('blur', () => UI.updateStatus(window._sageState || state));
+    }
+
     window._sageState = state;
     console.log('✅ SAGE2 ready |', LLM.activeProviderLabel(), '| Consensus:', LLM.isConsensusMode());
     UI.hideLoading();
@@ -85,6 +111,7 @@ const SAGE = (() => {
   // ── Run a trading session (auto-fetches market data first) ──
   async function runTradingSession(userNotes) {
     if (state.runningSession) return;
+    if (!requireForeground('Trading session')) return;
     state.runningSession = true;
     UI.setRunning(true, 'trading');
 
@@ -144,6 +171,7 @@ const SAGE = (() => {
   // ── Run a sports session (auto-fetches schedule + odds + injuries first) ──
   async function runSportsSession(userNotes) {
     if (state.runningSession) return;
+    if (!requireForeground('Sports session')) return;
     state.runningSession = true;
     UI.setRunning(true, 'sports');
 
@@ -153,7 +181,7 @@ const SAGE = (() => {
       const keys = Auth.getKeys();
       const sportsDate = document.getElementById('sports-date-filter')?.value || new Date().toISOString().slice(0,10);
       const sportsMode = document.getElementById('sports-date-mode')?.value || 'day';
-      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, mode: sportsMode });
+      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, mode: sportsMode, activeScreen: isForeground() });
 
       if (!feedResult.hasOdds) {
         UI.showToast('⚠️ No Odds API key — add one free in Profile for real moneylines', 'warning');
@@ -224,6 +252,7 @@ const SAGE = (() => {
 
   // ── Run autoresearch on weakest agent ──
   async function runAutoresearch(domain) {
+    if (!requireForeground('Autoresearch')) return;
     UI.showToast('Starting autoresearch...', 'info');
     const result = await AgentManager.triggerAutoresearch(domain);
     if (result.success) {
@@ -236,6 +265,7 @@ const SAGE = (() => {
 
   // ── Detect blind spots ──
   async function runBlindSpotDetection(domain) {
+    if (!requireForeground('Blind spot scan')) return;
     UI.showToast('Scanning for blind spots...', 'info');
     const spots = await AgentManager.detectBlindSpots(domain);
     const spawnCheck = await AgentManager.checkSpawnCondition(domain);
@@ -271,6 +301,7 @@ const SAGE = (() => {
 
   // ── Run backtest ──
   async function runBacktest(config) {
+    if (!requireForeground('Backtest')) return;
     UI.showToast('Starting backtest...', 'info');
     try {
       const results = await BacktestEngine.run(config, (p) => {
@@ -292,6 +323,8 @@ const SAGE = (() => {
     recordPickOutcome,
     runBacktest,
     updateSportsDateMode,
+    setActiveTab,
+    isForeground,
     getState: () => state,
     updateSheetsStatus: async () => {
       if (LLM.IS_LOCAL) {
