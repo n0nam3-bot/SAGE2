@@ -16,6 +16,7 @@
     syncAgentPerformance: existing.syncAgentPerformance || noop,
     logEquityPoint: existing.logEquityPoint || noop,
     overwriteRows: existing.overwriteRows || noop,
+    markSportsOutcome: existing.markSportsOutcome || noop,
     getAppsScriptUrl: existing.getAppsScriptUrl || (() => ''),
     setAppsScriptUrl: existing.setAppsScriptUrl || (() => {}),
   };
