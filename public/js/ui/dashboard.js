@@ -409,6 +409,9 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const units = pick.units ?? pick.stake_units ?? 1;
     const sport = (pick.sport || '').toUpperCase();
     const agents = pick.agents_in_agreement || [];
+    const llms = Array.isArray(pick.agreement_llms) ? pick.agreement_llms.filter(Boolean).map(l => `${l} LLM`) : [];
+    const creditedAgents = Array.isArray(pick.credited_agents) ? pick.credited_agents.filter(Boolean) : [];
+    const agreementLabel = [...new Set([...(pick.agreement_breakdown ? [pick.agreement_breakdown] : []), ...agents, ...llms, ...creditedAgents])];
 
     // Format date/time display
     const eventDate = pick.event_date || '';
@@ -458,7 +461,7 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
         <span class="conf-val" style="color:${confColor}">${conf}/100</span>
       </div>
       ${reasoning ? `<div class="pick-reasoning">${reasoningShort}</div>` : ''}
-      ${(pick.agreement_count || agents.length) > 1 ? `<div class="agents-agree agree-strong">🤝 ${pick.agreement_breakdown || agents.slice(0,3).join(', ')}${agents.length > 3 ? ` +${agents.length-3}` : ''}</div>` : (agents.length > 0 ? `<div class="agents-agree">🤝 ${agents.slice(0,3).join(', ')}${agents.length > 3 ? ` +${agents.length-3}` : ''}</div>` : '')}
+      ${(pick.agreement_count || agreementLabel.length) > 1 ? `<div class="agents-agree agree-strong">🤝 ${(pick.agreement_breakdown || agreementLabel.slice(0,3).join(', '))}${agreementLabel.length > 3 ? ` +${agreementLabel.length-3}` : ''}</div>` : (agreementLabel.length > 0 ? `<div class="agents-agree">🤝 ${agreementLabel.slice(0,3).join(', ')}${agreementLabel.length > 3 ? ` +${agreementLabel.length-3}` : ''}</div>` : '')}
       <div class="pick-actions">
         <button class="btn-sm win-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',true)">✅ Win</button>
         <button class="btn-sm loss-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',false)">❌ Loss</button>
@@ -741,15 +744,15 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const hyperBtn = document.getElementById('hyper-toggle-btn');
     if (hyperBtn) hyperBtn.classList.toggle('hyper-on', !!hyperOn);
     const keys = Auth?.getKeys?.() || {};
-    const activeProviders = ['ollama','gemini','groq','openrouter'].filter(p => p === 'ollama' ? !!(LLM.IS_LOCAL || window.__ollamaAvailable) : !!keys[p]);
+    const activeProviders = ['gemini','groq','openrouter'].filter(p => !!keys[p]);
 
     el.innerHTML = `
       <span class="status-item ok">${LLM.activeProviderLabel()}</span>
       ${activeProviders.length > 0 ? `
-        <span class="status-item ${hyperOn ? 'hyper-on' : ''}" style="cursor:pointer"
+        <span class="status-item" style="cursor:pointer"
           onclick="LLM.toggleHyperMode(); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isHyperMode() ? 'Hyper mode ON — all providers and models vote together' : 'Hyper mode OFF', 'info');"
           title="Toggle hyper mode">
-          ${hyperOn ? '🔥 HYPER MODE ON' : `⚡ Hyper Mode (${activeProviders.length} keys)`}
+          ⚡ Hyper (${activeProviders.length} keys)
         </span>` : ''}
       <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal?.()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
