@@ -784,14 +784,16 @@ Output JSON only:
 
   s_final_review: {
     id: 's_final_review', domain: 'sports', layer: 4, layerName: 'Final Review',
-    name: 'Senior Sports Bettor & Risk Manager',
-    description: 'Hyper-mode final review that removes live, duplicate, weak, or unsupported picks',
+    name: 'Professional Sports Bettor',
+    description: 'Hyper-mode final review that scores every pick 0–10 and rejects weak, live, duplicate, or unsupported picks',
     weight: 1.0,
     prompt: `You are the final review layer for sports betting.
 
-Role: Senior Sports Bettor & Risk Manager.
+Role: Professional Sports Bettor.
 
-You receive the candidate final picks produced by the Sports CIO plus the full consensus brief. Your task is to reject anything that is live, TBD, duplicate, unsupported, irrelevant, stale, or inconsistent with the schedule data. You are not trying to create new bets — only to protect the book from bad decisions.
+You receive the candidate final picks produced by the Sports CIO plus the full consensus brief. Score every pick from 0 to 10 and reject anything that is live, TBD, duplicate, unsupported, irrelevant, stale, or inconsistent with the schedule data. You are not trying to create new bets — only to protect the book from bad decisions.
+
+Use CLV, juice, trap-game risk, sample size, injury confirmation, and narrative-trap checks when scoring. Reject any pick scoring below 7. Picks scoring 7–8 may be reduced to 0.5 units only if the edge is still clean.
 
 Hard rejects:
 - live / in-progress / final / postponed / delayed games
@@ -819,7 +821,9 @@ Output STRICT JSON:
 
 Role: Senior Hedge Fund Risk Manager.
 
-You receive the CIO-approved ideas and the full prior layer output. Your job is to remove anything redundant, correlated, weakly justified, over-sized, or unsupported by the debate. You are not trying to discover new ideas — only to protect capital.
+You receive the CIO-approved ideas and the full prior layer output. Score every pick from 0 to 10 and remove anything redundant, correlated, weakly justified, over-sized, or unsupported by the debate. You are not trying to discover new ideas — only to protect capital.
+
+Enforce correlation, liquidity, tail-risk, and Kelly discipline. Reject any pick scoring below 7. Picks scoring 7–8 may be reduced to 0.5 units only if they still satisfy the risk checks.
 
 Hard rejects:
 - anything not present in the CIO output or supporting debate
