@@ -74,8 +74,8 @@ const UI = (() => {
         <h2>🧠 Agent Performance</h2>
         <div class="agent-header-actions">
           <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
-          <button class="btn-sm" onclick="SAGE.runFixWeakestAgent('all')">🛠️ Fix Weakest Agent</button>
           <button class="btn-sm" onclick="SAGE.runBlindSpotDetection('all')">🔍 Blind Spot Scan</button>
+          <button class="btn-sm" onclick="SAGE.runFixWeakestAgent('all')">🛠️ Fix Weakest Agent</button>
         </div>
       </div>
       ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
@@ -741,10 +741,8 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const hyperBtn = document.getElementById('hyper-toggle-btn');
     if (hyperBtn) hyperBtn.classList.toggle('hyper-on', !!hyperOn);
 
-    const statusLabel = hyperOn ? '🔥 HYPER MODE ON' : LLM.activeProviderLabel();
-
     el.innerHTML = `
-      <span class="status-item ${hyperOn ? 'hyper-status ok' : 'ok'}">${statusLabel}</span>
+      <span class="status-item ok">${LLM.activeProviderLabel()}</span>
       <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal?.()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
