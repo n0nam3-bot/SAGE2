@@ -242,6 +242,20 @@ Leave blank — SAGE fetches everything itself." style="min-height:90px"></texta
           </div>
 
           <div class="control-card">
+            <h3>🏟️ Sports to Analyze</h3>
+            <div class="form-group">
+              <label>Select one or more sports</label>
+              <div class="sports-market-grid">
+                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NFL" checked onchange="SAGE.saveSportsPreferences()"> NFL</label>
+                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NBA" checked onchange="SAGE.saveSportsPreferences()"> NBA</label>
+                <label class="sports-market-pill"><input type="checkbox" data-sports-code="MLB" checked onchange="SAGE.saveSportsPreferences()"> MLB</label>
+                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NHL" checked onchange="SAGE.saveSportsPreferences()"> NHL</label>
+                <label class="sports-market-pill"><input type="checkbox" data-sports-code="MMA" checked onchange="SAGE.saveSportsPreferences()"> MMA / UFC</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="control-card">
             <h3>🎚️ Pick Preferences</h3>
             <div class="form-group">
               <label for="sports-risk-profile">Risk / odds profile</label>
