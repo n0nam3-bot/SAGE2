@@ -120,20 +120,34 @@
       .map(pick => {
         const key = sportsKey(pick);
         const g = map.get(key) || { agents: new Set(), providers: new Set(), confidences: [], samples: [] };
-        const agents = [...new Set([...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []), ...g.agents])].filter(Boolean);
+        const baseAgents = [...new Set([...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []), ...g.agents])].filter(Boolean);
         const providers = [...g.providers].filter(Boolean);
-        const agreementCount = Math.max(agents.length, providers.length);
+        const decisionAgentId = pick.decision_agent_id || (baseAgents.includes('s_cio') ? 's_cio' : 's_cio');
+        const reviewAgentId = pick.review_agent_id || (baseAgents.includes('s_final_review') ? 's_final_review' : 's_final_review');
+        const creditedAgents = [...new Set([
+          ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
+          ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+          decisionAgentId,
+          reviewAgentId,
+        ].map(v => String(v || '').trim()).filter(Boolean))];
+        const agents = [...new Set([...baseAgents, decisionAgentId, reviewAgentId, ...creditedAgents])].filter(Boolean);
+        const agreementCount = Math.max(agents.length, providers.length, creditedAgents.length);
         const confidence = deriveConfidence(pick.confidence, agreementCount, providers.length, agents.length);
+        const breakdownParts = [];
+        if (providers.length) breakdownParts.push(...providers.map(p => `${p} LLM`));
+        if (agents.length) breakdownParts.push(agents.join(', '));
         return {
           ...pick,
+          decision_agent_id: decisionAgentId,
+          review_agent_id: reviewAgentId,
+          credited_agents: creditedAgents,
           confidence,
-          agents_in_agreement: agents.length ? agents : pick.agents_in_agreement || [],
+          agents_in_agreement: agents.length ? agents : (pick.agents_in_agreement || []),
+          agreement_agent_ids: creditedAgents,
           agreement_llms: providers,
           source_providers: providers,
           agreement_count: agreementCount,
-          agreement_breakdown: providers.length
-            ? `${providers.map(p => `${p} LLM`).join(' | ')}${agents.length ? ' | ' : ''}${agents.join(', ')}`
-            : (agents.join(', ') || ''),
+          agreement_breakdown: breakdownParts.join(' | '),
         };
       })
       .filter(pick => !isLiveLike(pick));
@@ -194,11 +208,22 @@
     result.finalPicks = result.finalPicks.map(pick => {
       const key = [safe(pick.ticker || pick.symbol || pick.name).toLowerCase(), safe(pick.action || pick.side || pick.bet || '').toLowerCase(), safe(pick.entry || pick.entry_price || pick.price || ''), safe(pick.target || pick.stop || '')].join('|');
       const g = map.get(key) || { agents: new Set(), providers: new Set(), confidences: [] };
-      const agents = [...new Set([...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []), ...g.agents])].filter(Boolean);
+      const decisionAgentId = pick.decision_agent_id || 't_cio';
+      const reviewAgentId = pick.review_agent_id || 't_review';
+      const creditedAgents = [...new Set([
+        ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
+        ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+        decisionAgentId,
+        reviewAgentId,
+      ].map(v => String(v || '').trim()).filter(Boolean))];
+      const agents = [...new Set([...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []), ...g.agents, decisionAgentId, reviewAgentId, ...creditedAgents])].filter(Boolean);
       const providers = [...g.providers].filter(Boolean);
-      const agreementCount = Math.max(agents.length, providers.length);
+      const agreementCount = Math.max(agents.length, providers.length, creditedAgents.length);
       const confidence = deriveConfidence(pick.confidence, agreementCount, providers.length, agents.length);
-      return { ...pick, confidence, agents_in_agreement: agents, agreement_llms: providers, source_providers: providers, agreement_count: agreementCount };
+      const breakdownParts = [];
+      if (providers.length) breakdownParts.push(...providers.map(p => `${p} LLM`));
+      if (agents.length) breakdownParts.push(agents.join(', '));
+      return { ...pick, decision_agent_id: decisionAgentId, review_agent_id: reviewAgentId, credited_agents: creditedAgents, confidence, agents_in_agreement: agents, agreement_agent_ids: creditedAgents, agreement_llms: providers, source_providers: providers, agreement_count: agreementCount, agreement_breakdown: breakdownParts.join(' | ') };
     });
     return result;
   }
