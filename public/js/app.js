@@ -26,23 +26,13 @@ const SAGE = (() => {
     return false;
   }
 
-  function hasSheetsSync() {
-    const token = !!Profile.getSheetsToken?.();
-    const scriptUrl = !!globalThis.SheetsClient?.getAppsScriptUrl?.();
-    const authorized = token || scriptUrl;
-    state.sheetsStatus = {
-      ...(state.sheetsStatus || {}),
-      authorized,
-      sheetsAuthorized: token,
-      appsScriptConfigured: scriptUrl,
-    };
-    window._sageState = state;
-    return authorized;
-  }
-
-  function refreshSheetsStatusUi() {
-    window._sageState = state;
-    UI.updateStatus?.(state);
+  function hasSheetsConnection() {
+    try {
+      if (LLM.IS_LOCAL) return !!state.sheetsStatus?.authorized;
+      return !!Profile?.getSheetsToken?.() || !!globalThis.SheetsClient?.getAppsScriptUrl?.();
+    } catch {
+      return false;
+    }
   }
 
   function setActiveTab(tab) {
@@ -156,7 +146,7 @@ const SAGE = (() => {
 
   async function syncResolvedSportsPicks() {
     if (!state.initialized || !isForeground()) return;
-    if (!hasSheetsSync()) return;
+    if (!hasSheetsConnection()) return;
     const picks = await DB.getAllPicks();
     const unresolved = picks.filter(p => p.domain === 'sports' && !p.outcomeDate && p.event_date && p.game && p.pick);
     if (!unresolved.length) return;
@@ -186,7 +176,7 @@ const SAGE = (() => {
     if (updated > 0) {
       UI.renderPerformance();
       UI.renderAgents();
-      if (hasSheetsSync()) {
+      if (hasSheetsConnection()) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
       }
@@ -320,7 +310,7 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (hasSheetsSync()) {
+      if (hasSheetsConnection()) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.logTradingSession?.(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'trading'));
@@ -388,7 +378,7 @@ const SAGE = (() => {
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (hasSheetsSync()) {
+      if (hasSheetsConnection()) {
         await globalThis.SheetsClient?.logSportsSession?.(result);
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
@@ -495,7 +485,7 @@ Spawn a new specialist agent?`);
       await AgentManager.recordOutcome(agentId, pick.domain, correct, returnPct);
     }
 
-    if (pick.domain === 'sports' && hasSheetsSync()) {
+    if (pick.domain === 'sports' && hasSheetsConnection()) {
       const allPicks = await DB.getAllPicks();
       const runningRoi = computeRunningRoi(allPicks);
       await globalThis.SheetsClient?.markSportsOutcome?.({
@@ -510,7 +500,7 @@ Spawn a new specialist agent?`);
 
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (hasSheetsSync()) {
+    if (hasSheetsConnection()) {
       await globalThis.SheetsClient?.syncAgentPerformance?.(agents);
     }
     UI.renderPerformance();
@@ -549,12 +539,12 @@ Spawn a new specialist agent?`);
     updateSheetsStatus: async () => {
       if (LLM.IS_LOCAL) {
         state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
-        refreshSheetsStatusUi();
       } else {
         const _scriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
-        state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
+        const _token = Profile?.getSheetsToken?.();
+        state.sheetsStatus = { authorized: !!_token || !!_scriptUrl, sheetsAuthorized: !!_token, appsScriptConfigured: !!_scriptUrl };
       }
-      refreshSheetsStatusUi();
+      UI.updateStatus(state);
     },
   };
 })();
