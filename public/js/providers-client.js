@@ -25,59 +25,6 @@ const LLM = (() => {
   const PROVIDER_ORDER = ['ollama', 'gemini', 'groq', 'openrouter'];
   const PROVIDER_MODE_KEY = 'sage_provider_mode';
   const VALID_PROVIDER_MODES = new Set(['auto', ...PROVIDER_ORDER]);
-  const PROVIDER_COOLDOWN_KEY = 'sage_provider_cooldowns';
-  const PROVIDER_COOLDOWN_MS = 60_000;
-
-  function readProviderCooldowns() {
-    try {
-      const raw = localStorage.getItem(PROVIDER_COOLDOWN_KEY);
-      if (!raw) return {};
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  }
-
-  function writeProviderCooldowns(state) {
-    try {
-      localStorage.setItem(PROVIDER_COOLDOWN_KEY, JSON.stringify(state || {}));
-    } catch {
-      // ignore storage failures
-    }
-  }
-
-  function isRateLimitError(err) {
-    const msg = String(err?.message || err || '').toLowerCase();
-    return msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests');
-  }
-
-  function setProviderCooldown(provider, ms = PROVIDER_COOLDOWN_MS) {
-    if (!provider) return;
-    const state = readProviderCooldowns();
-    state[provider] = Date.now() + ms;
-    writeProviderCooldowns(state);
-  }
-
-  function getProviderCooldownRemaining(provider) {
-    if (!provider) return 0;
-    const state = readProviderCooldowns();
-    const until = Number(state[provider] || 0);
-    return Math.max(0, until - Date.now());
-  }
-
-  function clearExpiredCooldowns() {
-    const state = readProviderCooldowns();
-    const now = Date.now();
-    let changed = false;
-    for (const [provider, until] of Object.entries(state)) {
-      if (!until || Number(until) <= now) {
-        delete state[provider];
-        changed = true;
-      }
-    }
-    if (changed) writeProviderCooldowns(state);
-  }
 
   function getProviderMode() {
     const stored = (localStorage.getItem(PROVIDER_MODE_KEY) || 'auto').toLowerCase();
@@ -120,7 +67,6 @@ const LLM = (() => {
   // Returns merged picks/analysis from Gemini + Groq + OpenRouter simultaneously.
   // Each provider runs the same prompt; results are merged before returning.
   async function chatMultiProvider({ system, messages, maxTokens = 2000 }) {
-    clearExpiredCooldowns();
     const keys = Auth.getKeys();
     const configured = [];
     if (IS_LOCAL) configured.push('ollama');
@@ -128,38 +74,19 @@ const LLM = (() => {
     if (keys.groq)       configured.push('groq');
     if (keys.openrouter) configured.push('openrouter');
 
-    const eligible = configured.filter(provider => getProviderCooldownRemaining(provider) <= 0);
-    const cooling = configured.filter(provider => getProviderCooldownRemaining(provider) > 0);
+    // If only one (or zero) providers, fall back to regular chat
+    if (configured.length <= 1) return chat({ system, messages, maxTokens });
 
-    // If only one (or zero) eligible providers, fall back to regular chat
-    if (eligible.length <= 1) {
-      if (eligible.length === 1) return chat({ system, messages, maxTokens, forceProvider: eligible[0] });
-      if (cooling.length) {
-        const provider = cooling[0];
-        const remaining = Math.ceil(getProviderCooldownRemaining(provider) / 1000);
-        throw new Error(`${PROVIDER_INFO[provider]?.name || provider} is cooling down for ${remaining}s. Try another provider or wait a moment.`);
-      }
-      return chat({ system, messages, maxTokens });
-    }
-
-    // Call all eligible providers in parallel
+    // Call all configured providers in parallel
     const results = await Promise.allSettled(
-      eligible.map(provider => callCascade({ system, messages, maxTokens, preferredProvider: provider }))
+      configured.map(provider => callCascade({ system, messages, maxTokens, preferredProvider: provider }))
     );
 
     const successes = results
-      .map((r, i) => r.status === 'fulfilled' ? { provider: eligible[i], text: r.value.text, model: r.value.model } : null)
+      .map((r, i) => r.status === 'fulfilled' ? { provider: configured[i], text: r.value.text, model: r.value.model } : null)
       .filter(Boolean);
 
-    if (successes.length === 0) {
-      const provider = cooling[0] || eligible[0];
-      const remaining = provider ? Math.ceil(getProviderCooldownRemaining(provider) / 1000) : 0;
-      const providerName = PROVIDER_INFO[provider]?.name || provider || 'LLM';
-      if (provider && remaining > 0) {
-        throw new Error(`${providerName} is cooling down for ${remaining}s. Try another provider or wait a moment.`);
-      }
-      throw new Error('All providers failed in consensus mode');
-    }
+    if (successes.length === 0) throw new Error('All providers failed in consensus mode');
     if (successes.length === 1) return {
       text: successes[0].text,
       provider: successes[0].provider,
@@ -342,7 +269,6 @@ const LLM = (() => {
 
   // ── Direct browser cascade ──
   async function callCascade({ system, messages, maxTokens, preferredProvider = 'auto' }) {
-    clearExpiredCooldowns();
     const keys = Auth.getKeys();
     const errors = [];
     const order = resolveProviderOrder(preferredProvider);
@@ -351,20 +277,12 @@ const LLM = (() => {
       // Ollama skipped on GitHub Pages (mixed content: HTTPS → HTTP)
       if (!IS_LOCAL && provider === 'ollama') continue;
       if (!keys[provider] && provider !== 'ollama') continue;
-
-      const cooldownRemaining = getProviderCooldownRemaining(provider);
-      if (cooldownRemaining > 0) {
-        errors.push(`${provider.charAt(0).toUpperCase() + provider.slice(1)}: cooling down for ${Math.ceil(cooldownRemaining / 1000)}s`);
-        continue;
-      }
-
       try {
         if (provider === 'ollama') return await callServerProxy({ system, messages, maxTokens });
         if (provider === 'gemini') return await callGemini(keys.gemini, system, messages, maxTokens);
         if (provider === 'groq') return await callGroq(keys.groq, system, messages, maxTokens);
         if (provider === 'openrouter') return await callOpenRouter(keys.openrouter, system, messages, maxTokens);
       } catch (e) {
-        if (isRateLimitError(e)) setProviderCooldown(provider);
         errors.push(`${provider.charAt(0).toUpperCase() + provider.slice(1)}: ${e.message}`);
       }
     }
@@ -372,30 +290,6 @@ const LLM = (() => {
     if (errors.length === 0)
       throw new Error('No API keys configured. Go to Profile → API Keys to add your free keys.');
     throw new Error('All providers failed. ' + errors.join(' | '));
-  }
-
-  // ── Gemini key test (lightweight model discovery call) ──
-  async function testGeminiKey(apiKey) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    if (res.status === 429) {
-      throw new Error('Gemini rate limited (429)');
-    }
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.error?.message || `Gemini model list HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-    const models = Array.isArray(data.models) ? data.models : [];
-    const flashModel = models.find(m => String(m.name || '').includes('gemini-2.5-flash'))?.name
-      || models.find(m => String(m.name || '').includes('gemini-2.0-flash'))?.name
-      || models[0]?.name
-      || 'Gemini';
-    return { text: `Gemini ready (${models.length} models)`, provider: 'gemini', model: flashModel };
   }
 
   // ── Gemini — native API (more reliable than OpenAI-compat endpoint) ──
@@ -437,7 +331,7 @@ const LLM = (() => {
 
       if (res.status === 429) {
         // Rate limited on this model — try next
-        lastErr = new Error(`Gemini ${model} rate limited (429)`);
+        lastErr = new Error(`Gemini ${model} rate limited (429) — try again in 60s or add Groq key`);
         continue;
       }
       if (!res.ok) {
@@ -466,7 +360,7 @@ const LLM = (() => {
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       const msg = e.error?.message || `Groq HTTP ${res.status}`;
-      if (res.status === 429) throw new Error('Groq rate limited (429)');
+      if (res.status === 429) throw new Error('Groq rate limited (429) — falling back to next provider');
       throw new Error(msg);
     }
     const data = await res.json();
@@ -525,32 +419,18 @@ const LLM = (() => {
   }
 
   // ── Test a specific provider key ──
-  async function testKey(provider, apiKey, options = {}) {
-    const { ignoreCooldown = true } = options || {};
+  async function testKey(provider, apiKey) {
     const testMsg = [{ role: 'user', content: 'Reply with exactly three words: SAGE is online' }];
     try {
-      if (!ignoreCooldown) {
-        const remaining = getProviderCooldownRemaining(provider);
-        if (remaining > 0) {
-          return { success: false, error: `${PROVIDER_INFO[provider]?.name || provider} is cooling down for ${Math.ceil(remaining / 1000)}s` };
-        }
-      }
       let result;
-      if (provider === 'gemini')     result = await testGeminiKey(apiKey);
+      if (provider === 'gemini')     result = await callGemini(apiKey, null, testMsg, 30);
       else if (provider === 'groq')  result = await callGroq(apiKey, null, testMsg, 30);
       else                           result = await callOpenRouter(apiKey, null, testMsg, 30);
       return { success: true, response: result.text.trim().slice(0, 80), model: result.model };
     } catch (e) {
       // Make error messages more human-readable
       let msg = e.message;
-      if (provider === 'gemini' && isRateLimitError(e)) {
-        // Do not persist a cooldown for manual key testing; Gemini quota can be transient.
-        msg = 'Google Gemini is rate limited right now. The key may still be valid — try again later or switch providers.';
-      } else if (isRateLimitError(e)) {
-        setProviderCooldown(provider);
-        const seconds = Math.ceil(getProviderCooldownRemaining(provider) / 1000);
-        msg = `${PROVIDER_INFO[provider]?.name || provider} is temporarily unavailable; try again in about ${seconds}s`;
-      }
+      if (msg.includes('429'))        msg = 'Rate limited — wait 60 seconds and try again';
       if (msg.includes('401'))        msg = 'Invalid API key — double-check you copied it correctly';
       if (msg.includes('403'))        msg = 'Access denied — your account may need verification';
       if (msg.includes('empty'))      msg = 'Key works but model returned empty — try again';

@@ -150,7 +150,7 @@ const Profile = (() => {
     const apiKey = keyEl.value.trim();
     if (!apiKey) { resultEl.textContent = '⚠️ Enter a key first'; resultEl.className = 'test-result warn'; return; }
     resultEl.textContent = '⏳ Testing...'; resultEl.className = 'test-result';
-    const result = await LLM.testKey(provider, apiKey, { ignoreCooldown: true });
+    const result = await LLM.testKey(provider, apiKey);
     if (result.success) {
       resultEl.textContent = `✅ Working — model: ${result.model}`;
       resultEl.className = 'test-result ok';
@@ -530,7 +530,7 @@ const Profile = (() => {
   }
 
   return {
-    saveKeys, testKey, testOddsKey, authorizeSheets, checkOAuthCallback, getSheetsToken,
+    saveKeys, testKey, testOddsKey, testAppsScript, authorizeSheets, checkOAuthCallback, getSheetsToken,
     exportProfile, showImport, doImport,
     showChangePassword, doChangePassword, showDeleteAccount, doDeleteAccount,
     logout, showAuthScreen, showApp, doLogin, doRegister, openProfileModal,
