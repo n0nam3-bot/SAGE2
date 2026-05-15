@@ -31,6 +31,166 @@ const SAGE = (() => {
     window._sageState = state;
   }
 
+
+  function hasSheetsSyncAccess() {
+    try {
+      return !!(state.sheetsStatus?.authorized
+        || state.sheetsStatus?.sheetsAuthorized
+        || state.sheetsStatus?.appsScriptConfigured
+        || Profile?.getSheetsToken?.()
+        || globalThis.SheetsClient?.getAppsScriptUrl?.());
+    } catch {
+      return false;
+    }
+  }
+
+  async function refreshSheetsStatus() {
+    try {
+      if (LLM.IS_LOCAL) {
+        state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+      } else {
+        const appsScriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
+        const token = Profile?.getSheetsToken?.();
+        state.sheetsStatus = {
+          authorized: !!token || !!appsScriptUrl,
+          sheetsAuthorized: !!token,
+          appsScriptConfigured: !!appsScriptUrl,
+        };
+      }
+    } catch {
+      state.sheetsStatus = {
+        authorized: !!Profile?.getSheetsToken?.() || !!globalThis.SheetsClient?.getAppsScriptUrl?.(),
+        sheetsAuthorized: !!Profile?.getSheetsToken?.(),
+        appsScriptConfigured: !!globalThis.SheetsClient?.getAppsScriptUrl?.(),
+      };
+    }
+    UI.updateStatus(state);
+    window._sageState = state;
+    return state.sheetsStatus;
+  }
+
+  function mapSportToLeague(sport = '') {
+    const s = String(sport).toUpperCase();
+    if (s.includes('NFL')) return { sport: 'football', league: 'nfl' };
+    if (s.includes('NBA')) return { sport: 'basketball', league: 'nba' };
+    if (s.includes('MLB')) return { sport: 'baseball', league: 'mlb' };
+    if (s.includes('NHL')) return { sport: 'hockey', league: 'nhl' };
+    return null;
+  }
+
+  function cleanOutcomeText(v) {
+    return String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function parseAmericanPnl(odds, units = 1) {
+    const o = Number(odds);
+    const u = Number(units) || 1;
+    if (!Number.isFinite(o) || o === 0) return 0;
+    return o < 0 ? (100 / Math.abs(o)) * u : (o / 100) * u;
+  }
+
+  function determineSportsOutcome(pick, game) {
+    const pickText = cleanOutcomeText(pick.pick);
+    const betType = cleanOutcomeText(pick.bet_type || pick.betType || pick.market);
+    const odds = Number(pick.odds || 0);
+    const awayTeam = String(game.awayTeam || '').toLowerCase();
+    const homeTeam = String(game.homeTeam || '').toLowerCase();
+    const awayScore = Number(game.awayScore ?? game.awayScoreFinal ?? 0);
+    const homeScore = Number(game.homeScore ?? game.homeScoreFinal ?? 0);
+    const total = awayScore + homeScore;
+    const totalMatch = `${pickText} ${betType}`.match(/\b(over|under)\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+    const spreadMatch = `${pickText} ${betType}`.match(/([+\-]\d+(?:\.\d+)?)/);
+    const line = Number(pick.line || pick.spread || (totalMatch ? totalMatch[2] : '') || (spreadMatch ? spreadMatch[1] : 0)) || 0;
+
+    if (/over/i.test(betType) || /over/i.test(pickText)) {
+      if (!line) return { correct: false, pnl: 0 };
+      return { correct: total > line, pnl: total > line ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
+    }
+    if (/under/i.test(betType) || /under/i.test(pickText)) {
+      if (!line) return { correct: false, pnl: 0 };
+      return { correct: total < line, pnl: total < line ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
+    }
+
+    const winner = awayScore > homeScore ? awayTeam : homeTeam;
+    const pickTeam = pickText.replace(/[^a-z\s]/g, ' ');
+    const isAway = awayTeam && pickTeam.includes(awayTeam);
+    const isHome = homeTeam && pickTeam.includes(homeTeam);
+    const guessedTeam = isAway ? awayTeam : isHome ? homeTeam : pickText;
+    const won = winner === guessedTeam || pickText.includes(winner);
+    return { correct: won, pnl: won ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
+  }
+
+  async function reconcileCompletedSportsOutcomes({ sessionResult = state.lastSportsSession } = {}) {
+    const picks = await DB.getPicksByDomain('sports').catch(() => []);
+    const unresolved = (picks || []).filter(p => !p.outcomeDate && !/live|tbd|tba/i.test(String(p.game_time || p.game || '')));
+    if (!unresolved.length) return 0;
+
+    const grouped = new Map();
+    for (const pick of unresolved) {
+      const meta = mapSportToLeague(pick.sport);
+      if (!meta) continue;
+      const eventDate = String(pick.eventDate || pick.event_date || '').slice(0, 10);
+      const key = `${meta.sport}:${meta.league}:${eventDate}`;
+      if (!grouped.has(key)) grouped.set(key, { ...meta, eventDate, picks: [] });
+      grouped.get(key).picks.push(pick);
+    }
+
+    let updated = 0;
+    for (const group of grouped.values()) {
+      const board = await DataFeeds.getESPNGames(group.sport, group.league, group.eventDate).catch(() => []);
+      for (const pick of group.picks) {
+        const game = board.find(g => {
+          const tgt = String(pick.game || '').toLowerCase();
+          const teams = `${String(g.awayTeam || '').toLowerCase()} @ ${String(g.homeTeam || '').toLowerCase()}`;
+          const rev = `${String(g.homeTeam || '').toLowerCase()} @ ${String(g.awayTeam || '').toLowerCase()}`;
+          return tgt.includes(teams) || tgt.includes(rev) || teams.includes(tgt) || rev.includes(tgt);
+        });
+        if (!game || String(game.statusState || '').toLowerCase() === 'pre' || game.isLive) continue;
+        const outcome = determineSportsOutcome(pick, game);
+        const resultLabel = outcome.correct ? 'win' : 'loss';
+        await DB.put(DB.STORES.picks, { ...pick, correct: outcome.correct, returnPct: outcome.pnl, pnl: outcome.pnl, outcomeDate: new Date().toISOString(), outcome: resultLabel });
+        if (Array.isArray(sessionResult?.finalPicks)) {
+          const livePick = sessionResult.finalPicks.find(p => String(p.sessionId || sessionResult.sessionId) === String(sessionResult.sessionId)
+            && String(p.game || '').toLowerCase() === String(pick.game || '').toLowerCase()
+            && String(pick.pick || '').toLowerCase() === String(p.pick || '').toLowerCase());
+          if (livePick) Object.assign(livePick, { correct: outcome.correct, pnl: outcome.pnl, outcomeDate: new Date().toISOString(), outcome: resultLabel });
+        }
+        const agreedAgentIds = [
+          pick.agentId,
+          ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+          ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement.filter(v => /^([st]_[a-z0-9_]+)$/i.test(String(v).trim())) : []),
+        ].map(v => String(v).trim()).filter(Boolean);
+        for (const agentId of [...new Set(agreedAgentIds)]) {
+          await AgentManager.recordOutcome(agentId, 'sports', outcome.correct, outcome.pnl);
+        }
+        if (hasSheetsSyncAccess()) {
+          await globalThis.SheetsClient?.markSportsOutcome?.({
+            sessionId: pick.sessionId,
+            game: pick.game,
+            pick: pick.pick,
+            betType: pick.betType || pick.bet_type,
+            eventDate: pick.eventDate || pick.event_date,
+            outcome: resultLabel,
+            pnl: outcome.pnl,
+            agentWeight: pick.agentWeight || pick.source_weight || 1,
+          }).catch(() => {});
+        }
+        updated += 1;
+      }
+    }
+
+    if (updated) {
+      await AgentManager.applyDarwinianUpdate('sports').catch(() => {});
+      const agents = await AgentManager.getAllAgents().catch(() => []);
+      if (hasSheetsSyncAccess()) {
+        await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports')).catch(() => {});
+      }
+      if (state.lastSportsSession?.finalPicks?.length) UI.renderSportsResults(state.lastSportsSession);
+      UI.renderAgents();
+    }
+    return updated;
+  }
+
   // ── Boot (called after successful login) ──
   async function init() {
     console.log('🧠 SAGE initializing...');
@@ -73,13 +233,8 @@ const SAGE = (() => {
     if (Profile.hydrateSheetsToken) {
       await Profile.hydrateSheetsToken().catch(() => {});
     }
-    if (LLM.IS_LOCAL) {
-      _setLoadMsg('Connecting to server…');
-      state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
-    } else {
-      const appsScriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
-      state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
-    }
+    _setLoadMsg('Checking Sheets…');
+    await refreshSheetsStatus();
 
     _setLoadMsg('Building dashboard…');
     UI.renderAll();
@@ -95,6 +250,14 @@ const SAGE = (() => {
       sportsDate.value = local.toISOString().slice(0, 10);
     }
     state.initialized = true;
+
+    if (!window.__sageOutcomeTimer) {
+      window.__sageOutcomeTimer = setInterval(() => {
+        if (!state.runningSession && isForeground()) {
+          reconcileCompletedSportsOutcomes().catch(() => {});
+        }
+      }, 15 * 60 * 1000);
+    }
 
     if (!window.__sageFocusListenersAdded) {
       window.__sageFocusListenersAdded = true;
@@ -149,7 +312,7 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (state.sheetsStatus?.authorized) {
+      if (hasSheetsSyncAccess()) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.logTradingSession?.(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'trading'));
@@ -204,7 +367,8 @@ const SAGE = (() => {
         await DB.savePick({
           domain: 'sports', sessionId: result.sessionId,
           agentId: pick.source_agent || 's_cio',
-          sport: pick.sport, game: pick.game, betType: pick.bet_type,
+          sport: pick.sport, game: pick.game, eventDate: pick.event_date || pick.eventDate || sportsDate, game_time: pick.game_time || '',
+          betType: pick.bet_type,
           pick: pick.pick, odds: pick.odds, units: pick.units,
           confidence: pick.confidence, reasoning: pick.full_reasoning,
           agents_in_agreement: pick.agents_in_agreement || [],
@@ -217,7 +381,7 @@ const SAGE = (() => {
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (state.sheetsStatus?.authorized) {
+      if (hasSheetsSyncAccess()) {
         await globalThis.SheetsClient?.logSportsSession?.(result);
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
@@ -325,7 +489,7 @@ Spawn a new specialist agent?`);
 
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (state.sheetsStatus?.authorized) {
+    if (hasSheetsSyncAccess()) {
       await globalThis.SheetsClient?.syncAgentPerformance?.(agents);
     }
     UI.renderPerformance();
@@ -362,12 +526,7 @@ Spawn a new specialist agent?`);
     isForeground,
     getState: () => state,
     updateSheetsStatus: async () => {
-      if (LLM.IS_LOCAL) {
-        state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
-      } else {
-        const _scriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
-        state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
-      }
+      await refreshSheetsStatus();
       UI.updateStatus(state);
     },
   };

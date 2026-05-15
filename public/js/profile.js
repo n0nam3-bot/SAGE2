@@ -135,8 +135,8 @@ const Profile = (() => {
       if (keys.apps_script_url) globalThis.SheetsClient?.setAppsScriptUrl?.(keys.apps_script_url);
       UI.showToast('Keys saved and encrypted ✅', 'success');
       document.getElementById('save-password').value = '';
-      // Update status bar
       const prov = document.getElementById('status-provider'); if (prov) prov.value = LLM.getProviderMode();
+      await globalThis.SAGE?.updateSheetsStatus?.().catch(() => {});
     } catch (err) {
       UI.showToast(err.message, 'error');
     }
@@ -273,19 +273,11 @@ const Profile = (() => {
       if (data?.success) {
         if (statusEl) { statusEl.textContent = '✅ Connected — tabs: ' + (data.tabs || []).join(', '); statusEl.className = 'test-result ok'; }
         globalThis.SheetsClient?.setAppsScriptUrl?.(url);
-        // Also save it immediately so it persists without needing Save Keys
         const user = (Auth.getSession?.()?.username || Auth.getLastUser?.() || 'global').toLowerCase();
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        // Refresh status bar
-        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
-        document.querySelectorAll('.status-item').forEach(el => {
-          if (el.textContent.includes('Sheets')) {
-            el.className = 'status-item ok';
-            el.innerHTML = '✅ Sheets';
-          }
-        });
+        await globalThis.SAGE?.updateSheetsStatus?.().catch(() => {});
       } else if (text.includes('script.google.com') || text.includes('<!DOCTYPE')) {
         if (statusEl) {
           statusEl.textContent = '⚠️ Got HTML instead of JSON — deployment may need "Execute as: Me" and "Who has access: Anyone"';
@@ -305,7 +297,7 @@ const Profile = (() => {
 
 
   // ── Check for OAuth token in URL hash (callback) ──
-  function checkOAuthCallback() {
+  async function checkOAuthCallback() {
     const hash = window.location.hash;
     if (!hash.includes('access_token')) return;
     const params = new URLSearchParams(hash.substring(1));
@@ -321,6 +313,7 @@ const Profile = (() => {
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
       UI.showToast('Google Sheets connected ✅', 'success');
+      await globalThis.SAGE?.updateSheetsStatus?.().catch(() => {});
     }
   }
 
