@@ -74,8 +74,8 @@ const UI = (() => {
         <h2>🧠 Agent Performance</h2>
         <div class="agent-header-actions">
           <button class="btn-sm" onclick="UI.renderAgents()">🔄 Refresh Stats</button>
-          <button class="btn-sm" onclick="SAGE.runBlindSpotDetection('all')">🔍 Blind Spot Scan</button>
           <button class="btn-sm" onclick="SAGE.runFixWeakestAgent('all')">🛠️ Fix Weakest Agent</button>
+          <button class="btn-sm" onclick="SAGE.runBlindSpotDetection('all')">🔍 Blind Spot Scan</button>
         </div>
       </div>
       ${renderDomainAgentTable('Trading', tradingAgents, liveStats)}
@@ -333,7 +333,7 @@ const UI = (() => {
           <div style="font-size:15px;font-weight:600;margin-bottom:8px">No qualifying sports picks found</div>
           <div style="color:var(--text-secondary);font-size:13px;max-width:500px;text-align:center;line-height:1.7">
             ${errors.length
-              ? `${errors.length} agent(s) hit errors. Wait 60 seconds and try again.`
+              ? `${errors.length} agent(s) hit errors. Some providers may be cooling down; try again in a moment or switch LLMs.`
               : `No matching games found or agents returned malformed output.<br><br>
                  <strong>Paste today's specific games with odds labeled by sport (NFL:, NBA:, etc.)</strong>`}
           </div>
@@ -740,9 +740,17 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const hyperOn = LLM.isHyperMode?.();
     const hyperBtn = document.getElementById('hyper-toggle-btn');
     if (hyperBtn) hyperBtn.classList.toggle('hyper-on', !!hyperOn);
+    const keys = Auth?.getKeys?.() || {};
+    const activeProviders = ['gemini','groq','openrouter'].filter(p => !!keys[p]);
 
     el.innerHTML = `
       <span class="status-item ok">${LLM.activeProviderLabel()}</span>
+      ${activeProviders.length > 0 ? `
+        <span class="status-item" style="cursor:pointer"
+          onclick="LLM.toggleHyperMode(); UI.updateStatus(window._sageState || {}); UI.showToast(LLM.isHyperMode() ? 'Hyper mode ON — all providers and models vote together' : 'Hyper mode OFF', 'info');"
+          title="Toggle hyper mode">
+          ⚡ Hyper (${activeProviders.length} keys)
+        </span>` : ''}
       <span class="status-item ${sheetsOk ? 'ok' : 'warn'}" style="cursor:pointer" onclick="Profile.openProfileModal?.()" title="${sheetsOk ? 'Sheets connected' : 'Click to set up Sheets'}">
         ${sheetsOk ? '✅' : '⚠️'} Sheets
       </span>
