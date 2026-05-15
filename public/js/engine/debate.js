@@ -375,10 +375,10 @@ Provide your picks in the specified JSON format.`;
 
     // Extract final picks with fallback
     const cioResult = decisionResults.find(r => r.agentId === 's_cio');
-    const cioPicks = normalizeSportsFinalPicks(cioResult?.parsed?.final_picks || []);
+    const cioPicks = normalizeSportsFinalPicks(cioResult?.parsed?.final_picks || []).filter(p => isSportsPickAllowedByPreferences(p, sportsPreferences));
     const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults]);
     const fallbackTarget = Math.max(sportsPreferences.pickCount, 3);
-    const fallbackPicks = buildSportsFallbackPicks(allCandidates, fallbackTarget, Math.min(3, fallbackTarget));
+    const fallbackPicks = buildSportsFallbackPicks(allCandidates, fallbackTarget, Math.min(3, fallbackTarget), sportsPreferences);
     const mergedPicks = normalizeSportsFinalPicks([...cioPicks, ...fallbackPicks]);
 
     const scheduleData = ctx.scheduleData || {};
@@ -599,7 +599,7 @@ Provide your picks in the specified JSON format.`;
     const pickValue = obj.pick ?? obj.selection ?? obj.recommended_bet ?? obj.bet ?? obj.original_bet?.pick ?? obj.winner;
     const gameValue = obj.game ?? obj.event ?? obj.matchup ?? obj.fight ?? obj.fixture ?? obj.original_bet?.game ?? '';
     const betType = obj.bet_type ?? obj.market ?? obj.type ?? obj.original_bet?.bet_type ?? '';
-    const sport = obj.sport ?? obj.league ?? obj.original_bet?.sport ?? '';
+    const sport = normalizeSportCode(obj.sport ?? obj.league ?? obj.original_bet?.sport ?? '');
     const pick = typeof pickValue === 'string' ? pickValue : (pickValue != null ? String(pickValue) : '');
     const game = typeof gameValue === 'string' ? gameValue : (gameValue != null ? String(gameValue) : '');
 
@@ -651,12 +651,14 @@ Provide your picks in the specified JSON format.`;
     return Math.round(pct * 10) / 10;
   }
 
-  function buildSportsFallbackPicks(candidates, target = 7, minimum = 3) {
+  function buildSportsFallbackPicks(candidates, target = 7, minimum = 3, preferences = {}) {
+    const prefs = normalizeSportsPreferences(preferences);
     const scored = [];
     const seen = new Set();
     for (const c of Array.isArray(candidates) ? candidates : []) {
       const normalized = normalizeSportsPick(c);
       if (!normalized) continue;
+      if (!isSportsPickAllowedByPreferences(normalized, prefs)) continue;
       const key = dedupeSportsPickKey(normalized);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -696,7 +698,7 @@ Provide your picks in the specified JSON format.`;
 
     const normalized = {
       ...raw,
-      sport: raw.sport || raw.original_bet?.sport || '',
+      sport: normalizeSportCode(raw.sport || raw.original_bet?.sport || ''),
       game,
       event_date: eventDate,
       game_time: gameTime,
@@ -751,16 +753,37 @@ Provide your picks in the specified JSON format.`;
     return normalizeMarketFamily(pick.bet_type || pick.market);
   }
 
+  function normalizeSportCode(value) {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (!raw) return '';
+    if (raw === 'UFC' || raw === 'MMA/UFC' || raw.includes('MIXED MARTIAL')) return 'MMA';
+    if (['NFL', 'NBA', 'MLB', 'NHL', 'MMA'].includes(raw)) return raw;
+    if (/football/.test(raw)) return 'NFL';
+    if (/basketball/.test(raw)) return 'NBA';
+    if (/baseball/.test(raw)) return 'MLB';
+    if (/hockey/.test(raw)) return 'NHL';
+    if (/mma|ufc/.test(raw)) return 'MMA';
+    return raw;
+  }
+
+  function normalizeSportsSelection(values = []) {
+    const raw = Array.isArray(values) ? values : String(values || '').split(',');
+    const normalized = [...new Set(raw.map(normalizeSportCode).filter(code => ['NFL', 'NBA', 'MLB', 'NHL', 'MMA'].includes(code)))];
+    return normalized.length ? normalized : ['NFL', 'NBA', 'MLB', 'NHL', 'MMA'];
+  }
+
   function normalizeSportsPreferences(prefs = {}) {
     const allowedMarkets = Array.isArray(prefs.allowedMarkets) && prefs.allowedMarkets.length
       ? [...new Set(prefs.allowedMarkets.map(v => String(v).trim()).filter(Boolean))]
       : ['moneyline', 'spread', 'total', 'player_prop', 'game_prop', 'team_prop', 'special'];
+    const allowedSports = normalizeSportsSelection(prefs.allowedSports);
     return {
       oddsProfile: ['balanced', 'conservative', 'positive_only', 'lotto'].includes(prefs.oddsProfile)
         ? prefs.oddsProfile
         : 'balanced',
       pickCount: Math.max(1, Math.min(20, Number.parseInt(prefs.pickCount, 10) || 5)),
       allowedMarkets,
+      allowedSports,
     };
   }
 
@@ -800,21 +823,31 @@ Provide your picks in the specified JSON format.`;
     return score;
   }
 
+  function isSportsPickAllowedByPreferences(pick, prefs = {}) {
+    const normalizedPrefs = normalizeSportsPreferences(prefs);
+    const sport = normalizeSportCode(pick?.sport || pick?.league || pick?.original_bet?.sport || '');
+    if (normalizedPrefs.allowedSports.length && !normalizedPrefs.allowedSports.includes(sport)) return false;
+
+    const family = classifySportsMarketFamily(pick);
+    const allowedMarkets = new Set((normalizedPrefs.allowedMarkets || []).map(v => String(v).toLowerCase()));
+    if (!allowedMarkets.has(family) && !(family === 'prop' && allowedMarkets.has('player_prop'))) return false;
+    if (!isPreferredSportsOdds(pick?.odds, normalizedPrefs.oddsProfile)) return false;
+
+    if (normalizedPrefs.oddsProfile === 'conservative') {
+      const odds = Number(pick?.odds) || 0;
+      const conf = Number(pick?.confidence) || 0;
+      if (Math.abs(odds) > 200 || conf < 55) return false;
+    }
+    return true;
+  }
+
   function filterSportsPicksByPreferences(picks, preferences = {}) {
     const prefs = normalizeSportsPreferences(preferences);
-    const allowed = new Set(prefs.allowedMarkets.map(v => String(v).toLowerCase()));
     const scored = [];
     for (const raw of Array.isArray(picks) ? picks : []) {
       const pick = normalizeSportsPick(raw);
       if (!pick) continue;
-      const family = classifySportsMarketFamily(pick);
-      if (!allowed.has(family) && !(family === 'prop' && allowed.has('player_prop'))) continue;
-      if (!isPreferredSportsOdds(pick.odds, prefs.oddsProfile)) continue;
-      if (prefs.oddsProfile === 'conservative') {
-        const odds = Number(pick.odds) || 0;
-        const conf = Number(pick.confidence) || 0;
-        if (Math.abs(odds) > 200 || conf < 55) continue;
-      }
+      if (!isSportsPickAllowedByPreferences(pick, prefs)) continue;
       scored.push({ pick, score: sportsPreferenceScore(pick, prefs) });
     }
 
