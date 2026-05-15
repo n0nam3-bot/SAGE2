@@ -40,25 +40,11 @@ const DebateEngine = (() => {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const chatFn = LLM.isConsensusMode() ? LLM.chatMultiProvider : LLM.chat;
-        let result;
-        try {
-          result = await chatFn({
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userMessage }],
-            maxTokens: 1800,
-          });
-        } catch (chatErr) {
-          const msg = String(chatErr?.message || chatErr || '');
-          if (LLM.isConsensusMode() && /all providers failed in consensus mode/i.test(msg)) {
-            result = await LLM.chat({
-              system: systemPrompt,
-              messages: [{ role: 'user', content: userMessage }],
-              maxTokens: 1800,
-            });
-          } else {
-            throw chatErr;
-          }
-        }
+        const result = await chatFn({
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+          maxTokens: 1800,
+        });
 
         const rawText = result.text || '';
         let parsed = null;
@@ -287,29 +273,6 @@ Provide your picks in the specified JSON format.`;
       results.posture = cioResult.parsed.portfolio_posture;
       results.summary = cioResult.parsed.session_summary;
     }
-
-    if (LLM.isHyperMode?.()) {
-      const reviewAgents = tradingAgents.filter(a => a.layer === 5);
-      if (reviewAgents.length) {
-        onProgress?.({ stage: 'layer5', message: 'Running final risk review (hyper mode)...' });
-        const reviewCtx = {
-          marketContext: ctx.marketContext,
-          priorLayerOutput: {
-            ...decisionCtx.priorLayerOutput,
-            cioOutput: cioResult?.parsed || {},
-            finalPicks: results.finalPicks,
-          },
-        };
-        const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'trading');
-        results.layers.finalReview = reviewResults;
-        const reviewParsed = reviewResults.find(r => r.agentId === 't_review')?.parsed || reviewResults[0]?.parsed || {};
-        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed);
-        if (reviewParsed?.portfolio_posture) results.posture = reviewParsed.portfolio_posture;
-        if (reviewParsed?.regime_call) results.regime = reviewParsed.regime_call;
-        if (reviewParsed?.session_summary) results.summary = reviewParsed.session_summary;
-        onProgress?.({ stage: 'layer5_done', message: 'Final risk review complete', data: reviewResults });
-      }
-    }
     results.endTime = new Date().toISOString();
     results.finalPicks = results.finalPicks || [];
     onProgress?.({ stage: 'complete', message: `Session complete — ${results.finalPicks?.length || 0} final picks`, data: results });
@@ -390,29 +353,7 @@ Provide your picks in the specified JSON format.`;
     let finalPicks = consolidateSportsFinalPicks(scheduleFiltered);
 
     if (LLM.isHyperMode?.()) {
-      const reviewAgents = sportsAgents.filter(a => a.layer === 4);
-      if (reviewAgents.length) {
-        onProgress?.({ stage: 'layer4', message: 'Running final risk review (hyper mode)...' });
-        const reviewCtx = {
-          gamesContext: ctx.gamesContext,
-          injuryNews: ctx.injuryNews,
-          lineMovements: ctx.lineMovements,
-          scheduleData,
-          priorLayerOutput: {
-            specialistPicks: rawPicks,
-            supportAnalysis: extractSupportData(supportResults),
-            consensusBrief,
-            candidatePicks: finalPicks,
-            agentWeights,
-            hyperMode: true,
-          },
-        };
-        const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'sports');
-        results.layers.finalReview = reviewResults;
-        const reviewParsed = reviewResults.find(r => r.agentId === 's_final_review')?.parsed || reviewResults[0]?.parsed || {};
-        finalPicks = applySportsFinalReview(finalPicks, reviewParsed);
-        onProgress?.({ stage: 'layer4_done', message: 'Final risk review complete', data: reviewResults });
-      }
+      finalPicks = consolidateSportsFinalPicks(await runHyperReview('sports', finalPicks, ctx, consensusBrief));
     }
 
     results.finalPicks = finalPicks.slice(0, 5);
@@ -422,10 +363,8 @@ Provide your picks in the specified JSON format.`;
         enrichFinalSportsPicks(normalizeSportsFinalPicks(fallbackPicks), consensusBrief, scheduleData),
         scheduleData
       ));
-      const reviewedFallback = LLM.isHyperMode?.() && results.layers.finalReview
-        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {})
-        : fallbackFinal;
-      results.finalPicks = reviewedFallback.slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
+      results.finalPicks = (LLM.isHyperMode?.() ? consolidateSportsFinalPicks(await runHyperReview('sports', fallbackFinal, ctx, consensusBrief)) : fallbackFinal)
+        .slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
@@ -461,30 +400,6 @@ Provide your picks in the specified JSON format.`;
       }
     }
     return results;
-  }
-
-  function applySportsFinalReview(picks, reviewParsed) {
-    const approved = reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.final_picks || reviewParsed?.finalPicks;
-    if (Array.isArray(approved) && approved.length) {
-      return consolidateSportsFinalPicks(normalizeSportsFinalPicks(approved));
-    }
-    const rejected = new Set((reviewParsed?.rejected_picks || reviewParsed?.rejected || []).map(p => dedupeSportsPickKey(normalizeSportsPick(p) || p)).filter(Boolean));
-    if (rejected.size) {
-      return consolidateSportsFinalPicks(normalizeSportsFinalPicks((Array.isArray(picks) ? picks : []).filter(p => !rejected.has(dedupeSportsPickKey(p)))));
-    }
-    return picks;
-  }
-
-  function applyTradingFinalReview(picks, reviewParsed) {
-    const approved = reviewParsed?.approved_ideas || reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.top_ideas;
-    if (Array.isArray(approved) && approved.length) {
-      return approved;
-    }
-    const rejected = new Set((reviewParsed?.rejected_ideas || reviewParsed?.rejected_picks || reviewParsed?.rejected || []).map(item => String(item?.ticker || item?.symbol || item?.name || '').toLowerCase()).filter(Boolean));
-    if (rejected.size) {
-      return (Array.isArray(picks) ? picks : []).filter(item => !rejected.has(String(item?.ticker || item?.symbol || item?.name || '').toLowerCase()));
-    }
-    return picks;
   }
 
   let _onRateLimitCb = null;
