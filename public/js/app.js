@@ -31,166 +31,6 @@ const SAGE = (() => {
     window._sageState = state;
   }
 
-
-  function hasSheetsSyncAccess() {
-    try {
-      return !!(state.sheetsStatus?.authorized
-        || state.sheetsStatus?.sheetsAuthorized
-        || state.sheetsStatus?.appsScriptConfigured
-        || Profile?.getSheetsToken?.()
-        || globalThis.SheetsClient?.getAppsScriptUrl?.());
-    } catch {
-      return false;
-    }
-  }
-
-  async function refreshSheetsStatus() {
-    try {
-      if (LLM.IS_LOCAL) {
-        state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
-      } else {
-        const appsScriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
-        const token = Profile?.getSheetsToken?.();
-        state.sheetsStatus = {
-          authorized: !!token || !!appsScriptUrl,
-          sheetsAuthorized: !!token,
-          appsScriptConfigured: !!appsScriptUrl,
-        };
-      }
-    } catch {
-      state.sheetsStatus = {
-        authorized: !!Profile?.getSheetsToken?.() || !!globalThis.SheetsClient?.getAppsScriptUrl?.(),
-        sheetsAuthorized: !!Profile?.getSheetsToken?.(),
-        appsScriptConfigured: !!globalThis.SheetsClient?.getAppsScriptUrl?.(),
-      };
-    }
-    UI.updateStatus(state);
-    window._sageState = state;
-    return state.sheetsStatus;
-  }
-
-  function mapSportToLeague(sport = '') {
-    const s = String(sport).toUpperCase();
-    if (s.includes('NFL')) return { sport: 'football', league: 'nfl' };
-    if (s.includes('NBA')) return { sport: 'basketball', league: 'nba' };
-    if (s.includes('MLB')) return { sport: 'baseball', league: 'mlb' };
-    if (s.includes('NHL')) return { sport: 'hockey', league: 'nhl' };
-    return null;
-  }
-
-  function cleanOutcomeText(v) {
-    return String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  }
-
-  function parseAmericanPnl(odds, units = 1) {
-    const o = Number(odds);
-    const u = Number(units) || 1;
-    if (!Number.isFinite(o) || o === 0) return 0;
-    return o < 0 ? (100 / Math.abs(o)) * u : (o / 100) * u;
-  }
-
-  function determineSportsOutcome(pick, game) {
-    const pickText = cleanOutcomeText(pick.pick);
-    const betType = cleanOutcomeText(pick.bet_type || pick.betType || pick.market);
-    const odds = Number(pick.odds || 0);
-    const awayTeam = String(game.awayTeam || '').toLowerCase();
-    const homeTeam = String(game.homeTeam || '').toLowerCase();
-    const awayScore = Number(game.awayScore ?? game.awayScoreFinal ?? 0);
-    const homeScore = Number(game.homeScore ?? game.homeScoreFinal ?? 0);
-    const total = awayScore + homeScore;
-    const totalMatch = `${pickText} ${betType}`.match(/\b(over|under)\s*([0-9]+(?:\.[0-9]+)?)\b/i);
-    const spreadMatch = `${pickText} ${betType}`.match(/([+\-]\d+(?:\.\d+)?)/);
-    const line = Number(pick.line || pick.spread || (totalMatch ? totalMatch[2] : '') || (spreadMatch ? spreadMatch[1] : 0)) || 0;
-
-    if (/over/i.test(betType) || /over/i.test(pickText)) {
-      if (!line) return { correct: false, pnl: 0 };
-      return { correct: total > line, pnl: total > line ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
-    }
-    if (/under/i.test(betType) || /under/i.test(pickText)) {
-      if (!line) return { correct: false, pnl: 0 };
-      return { correct: total < line, pnl: total < line ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
-    }
-
-    const winner = awayScore > homeScore ? awayTeam : homeTeam;
-    const pickTeam = pickText.replace(/[^a-z\s]/g, ' ');
-    const isAway = awayTeam && pickTeam.includes(awayTeam);
-    const isHome = homeTeam && pickTeam.includes(homeTeam);
-    const guessedTeam = isAway ? awayTeam : isHome ? homeTeam : pickText;
-    const won = winner === guessedTeam || pickText.includes(winner);
-    return { correct: won, pnl: won ? parseAmericanPnl(odds, pick.units || 1) : -(pick.units || 1) };
-  }
-
-  async function reconcileCompletedSportsOutcomes({ sessionResult = state.lastSportsSession } = {}) {
-    const picks = await DB.getPicksByDomain('sports').catch(() => []);
-    const unresolved = (picks || []).filter(p => !p.outcomeDate && !/live|tbd|tba/i.test(String(p.game_time || p.game || '')));
-    if (!unresolved.length) return 0;
-
-    const grouped = new Map();
-    for (const pick of unresolved) {
-      const meta = mapSportToLeague(pick.sport);
-      if (!meta) continue;
-      const eventDate = String(pick.eventDate || pick.event_date || '').slice(0, 10);
-      const key = `${meta.sport}:${meta.league}:${eventDate}`;
-      if (!grouped.has(key)) grouped.set(key, { ...meta, eventDate, picks: [] });
-      grouped.get(key).picks.push(pick);
-    }
-
-    let updated = 0;
-    for (const group of grouped.values()) {
-      const board = await DataFeeds.getESPNGames(group.sport, group.league, group.eventDate).catch(() => []);
-      for (const pick of group.picks) {
-        const game = board.find(g => {
-          const tgt = String(pick.game || '').toLowerCase();
-          const teams = `${String(g.awayTeam || '').toLowerCase()} @ ${String(g.homeTeam || '').toLowerCase()}`;
-          const rev = `${String(g.homeTeam || '').toLowerCase()} @ ${String(g.awayTeam || '').toLowerCase()}`;
-          return tgt.includes(teams) || tgt.includes(rev) || teams.includes(tgt) || rev.includes(tgt);
-        });
-        if (!game || String(game.statusState || '').toLowerCase() === 'pre' || game.isLive) continue;
-        const outcome = determineSportsOutcome(pick, game);
-        const resultLabel = outcome.correct ? 'win' : 'loss';
-        await DB.put(DB.STORES.picks, { ...pick, correct: outcome.correct, returnPct: outcome.pnl, pnl: outcome.pnl, outcomeDate: new Date().toISOString(), outcome: resultLabel });
-        if (Array.isArray(sessionResult?.finalPicks)) {
-          const livePick = sessionResult.finalPicks.find(p => String(p.sessionId || sessionResult.sessionId) === String(sessionResult.sessionId)
-            && String(p.game || '').toLowerCase() === String(pick.game || '').toLowerCase()
-            && String(pick.pick || '').toLowerCase() === String(p.pick || '').toLowerCase());
-          if (livePick) Object.assign(livePick, { correct: outcome.correct, pnl: outcome.pnl, outcomeDate: new Date().toISOString(), outcome: resultLabel });
-        }
-        const agreedAgentIds = [
-          pick.agentId,
-          ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
-          ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement.filter(v => /^([st]_[a-z0-9_]+)$/i.test(String(v).trim())) : []),
-        ].map(v => String(v).trim()).filter(Boolean);
-        for (const agentId of [...new Set(agreedAgentIds)]) {
-          await AgentManager.recordOutcome(agentId, 'sports', outcome.correct, outcome.pnl);
-        }
-        if (hasSheetsSyncAccess()) {
-          await globalThis.SheetsClient?.markSportsOutcome?.({
-            sessionId: pick.sessionId,
-            game: pick.game,
-            pick: pick.pick,
-            betType: pick.betType || pick.bet_type,
-            eventDate: pick.eventDate || pick.event_date,
-            outcome: resultLabel,
-            pnl: outcome.pnl,
-            agentWeight: pick.agentWeight || pick.source_weight || 1,
-          }).catch(() => {});
-        }
-        updated += 1;
-      }
-    }
-
-    if (updated) {
-      await AgentManager.applyDarwinianUpdate('sports').catch(() => {});
-      const agents = await AgentManager.getAllAgents().catch(() => []);
-      if (hasSheetsSyncAccess()) {
-        await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports')).catch(() => {});
-      }
-      if (state.lastSportsSession?.finalPicks?.length) UI.renderSportsResults(state.lastSportsSession);
-      UI.renderAgents();
-    }
-    return updated;
-  }
-
   // ── Boot (called after successful login) ──
   async function init() {
     console.log('🧠 SAGE initializing...');
@@ -233,8 +73,13 @@ const SAGE = (() => {
     if (Profile.hydrateSheetsToken) {
       await Profile.hydrateSheetsToken().catch(() => {});
     }
-    _setLoadMsg('Checking Sheets…');
-    await refreshSheetsStatus();
+    if (LLM.IS_LOCAL) {
+      _setLoadMsg('Connecting to server…');
+      state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+    } else {
+      const appsScriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
+      state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!appsScriptUrl, appsScriptConfigured: !!appsScriptUrl, sheetsAuthorized: !!Profile.getSheetsToken() };
+    }
 
     _setLoadMsg('Building dashboard…');
     UI.renderAll();
@@ -251,19 +96,22 @@ const SAGE = (() => {
     }
     state.initialized = true;
 
-    if (!window.__sageOutcomeTimer) {
-      window.__sageOutcomeTimer = setInterval(() => {
-        if (!state.runningSession && isForeground()) {
-          reconcileCompletedSportsOutcomes().catch(() => {});
-        }
-      }, 15 * 60 * 1000);
-    }
-
     if (!window.__sageFocusListenersAdded) {
       window.__sageFocusListenersAdded = true;
-      document.addEventListener('visibilitychange', () => UI.updateStatus(window._sageState || state));
-      window.addEventListener('focus', () => UI.updateStatus(window._sageState || state));
+      document.addEventListener('visibilitychange', () => {
+        UI.updateStatus(window._sageState || state);
+        if (document.visibilityState === 'visible') reconcileCompletedSportsOutcomes().catch(() => {});
+      });
+      window.addEventListener('focus', () => {
+        UI.updateStatus(window._sageState || state);
+        reconcileCompletedSportsOutcomes().catch(() => {});
+      });
       window.addEventListener('blur', () => UI.updateStatus(window._sageState || state));
+      if (!window.__sageOutcomePoller) {
+        window.__sageOutcomePoller = setInterval(() => {
+          if (document.visibilityState === 'visible') reconcileCompletedSportsOutcomes().catch(() => {});
+        }, 10 * 60 * 1000);
+      }
     }
 
     window._sageState = state;
@@ -312,10 +160,12 @@ const SAGE = (() => {
       if (result.regime) await RegimeEngine.setRegime('trading', result.regime);
       await AgentManager.applyDarwinianUpdate('trading');
 
-      if (hasSheetsSyncAccess()) {
+      const tradingSheetsStatus = await globalThis.SheetsClient?.checkStatus?.().catch(() => state.sheetsStatus || {}) || state.sheetsStatus || {};
+      if (tradingSheetsStatus?.authorized) {
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.logTradingSession?.(result, agents.reduce((acc, a) => { acc[a.id] = a.weight; return acc; }, {}));
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'trading'));
+        state.sheetsStatus = tradingSheetsStatus;
       }
 
       UI.renderTradingResults(result);
@@ -366,9 +216,12 @@ const SAGE = (() => {
       for (const pick of result.finalPicks || []) {
         await DB.savePick({
           domain: 'sports', sessionId: result.sessionId,
-          agentId: pick.source_agent || 's_cio',
-          sport: pick.sport, game: pick.game, eventDate: pick.event_date || pick.eventDate || sportsDate, game_time: pick.game_time || '',
-          betType: pick.bet_type,
+          agentId: pick.decision_agent_id || pick.source_agent || 's_cio',
+          decision_agent_id: pick.decision_agent_id || 's_cio',
+          review_agent_id: pick.review_agent_id || (LLM.isHyperMode?.() ? 's_final_review' : ''),
+          credited_agents: pick.credited_agents || [pick.decision_agent_id || 's_cio', pick.review_agent_id || (LLM.isHyperMode?.() ? 's_final_review' : '')].filter(Boolean),
+          source_weight: pick.source_weight || 1,
+          sport: pick.sport, game: pick.game, betType: pick.bet_type,
           pick: pick.pick, odds: pick.odds, units: pick.units,
           confidence: pick.confidence, reasoning: pick.full_reasoning,
           agents_in_agreement: pick.agents_in_agreement || [],
@@ -381,14 +234,17 @@ const SAGE = (() => {
 
       await AgentManager.applyDarwinianUpdate('sports');
 
-      if (hasSheetsSyncAccess()) {
+      const sheetsStatus = await globalThis.SheetsClient?.checkStatus?.().catch(() => state.sheetsStatus || {}) || state.sheetsStatus || {};
+      if (sheetsStatus?.authorized) {
         await globalThis.SheetsClient?.logSportsSession?.(result);
         const agents = await AgentManager.getAllAgents();
         await globalThis.SheetsClient?.syncAgentPerformance?.(agents.filter(a => a.domain === 'sports'));
+        state.sheetsStatus = sheetsStatus;
       }
 
       UI.renderSportsResults(result);
       window._sageState = state;
+      reconcileCompletedSportsOutcomes().catch(() => {});
     UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
 
     } catch (err) {
@@ -472,10 +328,14 @@ Spawn a new specialist agent?`);
   async function recordPickOutcome(pickId, correct, returnPct) {
     const pick = await DB.get(DB.STORES.picks, pickId);
     if (!pick) return;
-    await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, outcomeDate: new Date().toISOString() });
+    const outcomeDate = new Date().toISOString();
+    await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, outcomeDate });
 
     const agreedAgentIds = [
       pick.agentId,
+      pick.decision_agent_id,
+      pick.review_agent_id,
+      ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
       ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
       ...(Array.isArray(pick.agents_in_agreement)
         ? pick.agents_in_agreement.filter(v => /^([st]_[a-z0-9_]+)$/i.test(String(v).trim()))
@@ -489,12 +349,96 @@ Spawn a new specialist agent?`);
 
     await AgentManager.applyDarwinianUpdate(pick.domain);
     const agents = await AgentManager.getAllAgents();
-    if (hasSheetsSyncAccess()) {
+    const primaryAgent = await AgentManager.getAgent(pick.agentId);
+    const runningRoi = Number.isFinite(Number(primaryAgent?.stats?.roi)) ? Number(primaryAgent.stats.roi) * 100 : undefined;
+    const sheetsStatus = await globalThis.SheetsClient?.checkStatus?.().catch(() => state.sheetsStatus || {}) || state.sheetsStatus || {};
+    if (sheetsStatus?.authorized) {
       await globalThis.SheetsClient?.syncAgentPerformance?.(agents);
+      await globalThis.SheetsClient?.markOutcomeRow?.({
+        tab: pick.domain === 'trading' ? 'Trading Picks' : 'Sports Picks',
+        sessionId: pick.sessionId,
+        identifier: pick.domain === 'trading' ? (pick.ticker || pick.action || pick.thesis || pick.agentId || '') : (pick.game || pick.pick || pick.agentId || ''),
+        outcome: correct ? 'win' : 'loss',
+        pnl: returnPct,
+        runningRoi,
+        agentWeight: primaryAgent?.weight || pick.weight || 1,
+      });
+      state.sheetsStatus = sheetsStatus;
     }
     UI.renderPerformance();
     UI.renderAgents();
     UI.showToast('Outcome recorded ✅', 'success');
+  }
+
+
+  async function reconcileCompletedSportsOutcomes() {
+    try {
+      const picks = (await DB.getAllPicks()).filter(p => p.domain === 'sports' && !p.outcomeDate);
+      if (!picks.length) return;
+      const byDate = new Map();
+      for (const p of picks) {
+        const d = String(p.event_date || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+        if (!byDate.has(d)) byDate.set(d, []);
+        byDate.get(d).push(p);
+      }
+      if (!byDate.size || !DataFeeds.getSportsScoreboards) return;
+      for (const [date, datePicks] of byDate.entries()) {
+        const scoreboard = await DataFeeds.getSportsScoreboards(date);
+        const allGames = [...(scoreboard.NFL || []), ...(scoreboard.NBA || []), ...(scoreboard.MLB || []), ...(scoreboard.NHL || [])];
+        for (const pick of datePicks) {
+          const game = allGames.find(g => {
+            const text = String(pick.game || '').toLowerCase();
+            const away = String(g.awayTeam || '').toLowerCase();
+            const home = String(g.homeTeam || '').toLowerCase();
+            return text.includes(away) && text.includes(home);
+          });
+          if (!game) continue;
+          const state = String(game.statusState || '').toLowerCase();
+          const detail = String(game.status || '').toLowerCase();
+          if (state !== 'post' && !/final|completed/.test(detail)) continue;
+          const outcome = determineSportsOutcomeFromScore(pick, game);
+          if (!outcome) continue;
+          await recordPickOutcome(pick.id, outcome.correct, outcome.pnl);
+        }
+      }
+    } catch (err) {
+      console.warn('[SAGE] reconcile outcomes skipped:', err.message);
+    }
+  }
+
+  function determineSportsOutcomeFromScore(pick, game) {
+    const pickLabel = String(pick.pick || '').toLowerCase();
+    const home = String(game.homeTeam || '').toLowerCase();
+    const away = String(game.awayTeam || '').toLowerCase();
+    const homeScore = Number(game.homeScore);
+    const awayScore = Number(game.awayScore);
+    if (!Number.isFinite(homeScore) || !Number.isFinite(awayScore)) return null;
+    const winner = homeScore > awayScore ? home : away;
+    if (/\bover\b/.test(pickLabel) || /\bunder\b/.test(pickLabel) || /\btotal\b/.test(String(pick.bet_type || '').toLowerCase())) {
+      const total = homeScore + awayScore;
+      const lineMatch = String(pick.pick || pick.bet_type || '').match(/(\d+(?:\.\d+)?)/);
+      if (!lineMatch) return null;
+      const line = Number(lineMatch[1]);
+      if (!Number.isFinite(line)) return null;
+      const isOver = /\bover\b/i.test(pickLabel) || /\bover\b/i.test(String(pick.bet_type || ''));
+      const isUnder = /\bunder\b/i.test(pickLabel) || /\bunder\b/i.test(String(pick.bet_type || ''));
+      if (isOver) return { correct: total > line, pnl: total > line ? pnlFromOdds(pick.odds, pick.units) : -(pick.units || 1) };
+      if (isUnder) return { correct: total < line, pnl: total < line ? pnlFromOdds(pick.odds, pick.units) : -(pick.units || 1) };
+      return null;
+    }
+    const selected = pickLabel.replace(/\s+(ml|moneyline|money line)\b/g, '').trim();
+    if (!selected) return null;
+    if (home && selected.includes(home)) return { correct: winner === home, pnl: winner === home ? pnlFromOdds(pick.odds, pick.units) : -(pick.units || 1) };
+    if (away && selected.includes(away)) return { correct: winner === away, pnl: winner === away ? pnlFromOdds(pick.odds, pick.units) : -(pick.units || 1) };
+    return null;
+  }
+
+  function pnlFromOdds(odds, units = 1) {
+    const n = Number(odds);
+    const u = Number(units) || 1;
+    if (!Number.isFinite(n) || n === 0) return u;
+    return n > 0 ? (u * (n / 100)) : (u * (100 / Math.abs(n)));
   }
 
   // ── Run backtest ──
@@ -526,7 +470,12 @@ Spawn a new specialist agent?`);
     isForeground,
     getState: () => state,
     updateSheetsStatus: async () => {
-      await refreshSheetsStatus();
+      if (LLM.IS_LOCAL) {
+        state.sheetsStatus = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+      } else {
+        const _scriptUrl = globalThis.SheetsClient?.getAppsScriptUrl?.() || '';
+        state.sheetsStatus = { authorized: !!Profile.getSheetsToken() || !!_scriptUrl, sheetsAuthorized: !!Profile.getSheetsToken(), appsScriptConfigured: !!_scriptUrl };
+      }
       UI.updateStatus(state);
     },
   };
