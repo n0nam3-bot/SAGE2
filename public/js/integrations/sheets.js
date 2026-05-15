@@ -280,90 +280,6 @@ var SheetsClient = globalThis.SheetsClient = (() => {
     });
   }
 
-  async function markSportsOutcome({ sessionId, identifier, outcome, pnl, runningRoi, agentWeight }) {
-    try {
-      const payload = {
-        action: 'mark_outcome',
-        tab: 'Sports Picks',
-        sessionId,
-        identifier,
-        outcome,
-        pnl,
-        runningRoi,
-        agentWeight,
-        username: currentUsername(),
-      };
-      const scriptUrl = getAppsScriptUrl();
-      if (scriptUrl) {
-        await fetch(scriptUrl, {
-          method: 'POST',
-          mode: 'no-cors',
-          headers: { 'Content-Type': 'text/plain' },
-          body: JSON.stringify(payload),
-        });
-        return true;
-      }
-      if (isLocal()) {
-        await fetch('/api/sheets/mark-outcome', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        return true;
-      }
-      await markSportsOutcomeDirect(payload);
-      return true;
-    } catch (err) {
-      console.warn('[Sheets] markSportsOutcome failed:', err.message);
-      return false;
-    }
-  }
-
-  async function markSportsOutcomeDirect(payload) {
-    const token = getToken();
-    const sheetId = getSheetId();
-    if (!token || !sheetId) throw new Error('Missing Sheets token or sheet ID');
-    const range = encodeURIComponent(`'Sports Picks'!A:S`);
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`,
-      { headers: { 'Authorization': `Bearer ${token}` } });
-    if (!res.ok) throw new Error(`Sheets read ${res.status}`);
-    const data = await res.json();
-    const rows = data.values || [];
-    if (rows.length < 2) return false;
-    const headers = rows[0].map(h => String(h || ''));
-    const sessionCol = headers.findIndex(h => h.toLowerCase().includes('session'));
-    const gameCol = headers.findIndex(h => h.toLowerCase() === 'game');
-    const pickCol = headers.findIndex(h => h.toLowerCase() === 'pick');
-    const outcomeCol = headers.findIndex(h => h.toLowerCase() === 'outcome');
-    const pnlCol = headers.findIndex(h => h.toLowerCase().includes('p&l'));
-    const roiCol = headers.findIndex(h => h.toLowerCase().includes('running roi'));
-    const weightCol = headers.findIndex(h => h.toLowerCase().includes('agent weight'));
-    const targetIdentifier = String(payload.identifier || '').toLowerCase();
-    let matched = -1;
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      const rowSession = String(row[sessionCol] || '');
-      const rowGame = String(row[gameCol] || '').toLowerCase();
-      const rowPick = String(row[pickCol] || '').toLowerCase();
-      const matchSession = !payload.sessionId || rowSession === String(payload.sessionId);
-      const matchIdentifier = !targetIdentifier || `${rowGame}||${rowPick}`.includes(targetIdentifier) || targetIdentifier.includes(`${rowGame}||${rowPick}`);
-      if (matchSession && matchIdentifier) { matched = i; break; }
-    }
-    if (matched < 0) return false;
-    const updateRow = rows[matched].slice();
-    if (outcomeCol >= 0) updateRow[outcomeCol] = payload.outcome === 'win' ? 'WIN ✅' : 'LOSS ❌';
-    if (pnlCol >= 0 && payload.pnl !== undefined) updateRow[pnlCol] = payload.pnl;
-    if (roiCol >= 0 && payload.runningRoi !== undefined) updateRow[roiCol] = payload.runningRoi;
-    if (weightCol >= 0 && payload.agentWeight !== undefined) updateRow[weightCol] = payload.agentWeight;
-    const rowRange = encodeURIComponent(`'Sports Picks'!A${matched + 1}:S${matched + 1}`);
-    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rowRange}?valueInputOption=USER_ENTERED`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: [updateRow] }),
-    });
-    return true;
-  }
-
   // ════════════════════════════════════════
   // PUBLIC LOGGING FUNCTIONS
   // ════════════════════════════════════════
@@ -412,7 +328,7 @@ var SheetsClient = globalThis.SheetsClient = (() => {
         odds, implied,
         pick.confidence || '',
         pick.units ?? pick.stake_units ?? 1,
-        '', '', '', (pick.source_weight ?? pick.agent_weight ?? pick.primary_agent_weight ?? ''),
+        '', '', '', '',   // outcome, P&L, ROI, weight (filled later)
         pick.full_reasoning || pick.reasoning || '',
         agreementCell,
       ];
@@ -495,7 +411,7 @@ var SheetsClient = globalThis.SheetsClient = (() => {
     checkStatus, authorize,
     logTradingSession, logSportsSession,
     logFreshOddsSnapshot, syncAgentPerformance, logEquityPoint,
-    overwriteRows, markSportsOutcome,
+    overwriteRows,
     loadSportsPicks, loadTradingPicks,
     getAppsScriptUrl, setAppsScriptUrl,
     appendViaAppsScript,
