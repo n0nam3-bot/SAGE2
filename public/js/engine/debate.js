@@ -303,7 +303,7 @@ Provide your picks in the specified JSON format.`;
         const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'trading');
         results.layers.finalReview = reviewResults;
         const reviewParsed = reviewResults.find(r => r.agentId === 't_review')?.parsed || reviewResults[0]?.parsed || {};
-        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed);
+        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed, { allIdeas });
         if (reviewParsed?.portfolio_posture) results.posture = reviewParsed.portfolio_posture;
         if (reviewParsed?.regime_call) results.regime = reviewParsed.regime_call;
         if (reviewParsed?.session_summary) results.summary = reviewParsed.session_summary;
@@ -410,7 +410,12 @@ Provide your picks in the specified JSON format.`;
         const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'sports');
         results.layers.finalReview = reviewResults;
         const reviewParsed = reviewResults.find(r => r.agentId === 's_final_review')?.parsed || reviewResults[0]?.parsed || {};
-        finalPicks = applySportsFinalReview(finalPicks, reviewParsed);
+        finalPicks = applySportsFinalReview(finalPicks, reviewParsed, {
+          scheduleData,
+          lineMovements: ctx.lineMovements,
+          supportAnalysis: extractSupportData(supportResults),
+          consensusBrief,
+        });
         onProgress?.({ stage: 'layer4_done', message: 'Final risk review complete', data: reviewResults });
       }
     }
@@ -423,7 +428,12 @@ Provide your picks in the specified JSON format.`;
         scheduleData
       ));
       const reviewedFallback = LLM.isHyperMode?.() && results.layers.finalReview
-        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {})
+        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {}, {
+          scheduleData,
+          lineMovements: ctx.lineMovements,
+          supportAnalysis: extractSupportData(supportResults),
+          consensusBrief,
+        })
         : fallbackFinal;
       results.finalPicks = reviewedFallback.slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
@@ -463,7 +473,149 @@ Provide your picks in the specified JSON format.`;
     return results;
   }
 
-  function applySportsFinalReview(picks, reviewParsed) {
+
+  function normalizeTradingFinalPick(raw) {
+    const pick = raw || {};
+    const num = v => Number(String(v ?? '').replace(/[^\d.+-]/g, ''));
+    return {
+      ...pick,
+      ticker: String(pick.ticker || pick.symbol || pick.name || '').trim(),
+      action: String(pick.action || pick.side || '').trim(),
+      entry: Number.isFinite(num(pick.entry)) ? num(pick.entry) : pick.entry,
+      target: Number.isFinite(num(pick.target)) ? num(pick.target) : pick.target,
+      stop: Number.isFinite(num(pick.stop)) ? num(pick.stop) : pick.stop,
+      size_pct: Number(pick.size_pct ?? pick.units ?? pick.position_size ?? 0) || 0,
+      confidence: Number(pick.confidence || 0) || 0,
+      source_agent_source: pick.primary_agent_source || pick.source_agent || pick.sourceAgent || '',
+    };
+  }
+
+  function scoreTradingHyperPick(rawPick, reviewCtx = {}) {
+    const pick = normalizeTradingFinalPick(rawPick);
+    const notes = [];
+    let score = 10;
+
+    if (!pick.ticker) { score -= 4; notes.push('missing ticker'); }
+    if (!pick.action) { score -= 3; notes.push('missing action'); }
+    if (!Number.isFinite(Number(pick.entry))) { score -= 1.5; notes.push('missing entry'); }
+    if (!Number.isFinite(Number(pick.target))) { score -= 1.5; notes.push('missing target'); }
+    if (!Number.isFinite(Number(pick.stop))) { score -= 1.5; notes.push('missing stop'); }
+
+    const entry = Number(pick.entry), target = Number(pick.target), stop = Number(pick.stop);
+    if (Number.isFinite(entry) && Number.isFinite(target) && Number.isFinite(stop) && entry !== stop) {
+      const reward = Math.abs(target - entry);
+      const risk = Math.abs(entry - stop) || 1;
+      const rr = reward / risk;
+      if (rr < 1) { score -= 2.5; notes.push('poor reward/risk'); }
+      else if (rr < 1.5) { score -= 1.25; notes.push('thin reward/risk'); }
+    }
+
+    const size = Number(pick.size_pct || 0);
+    if (size > 3) { score -= 2; notes.push('oversized'); }
+    else if (size > 2) score -= 0.5;
+
+    if ((pick.confidence || 0) < 55) { score -= 2; notes.push('low confidence'); }
+    else if ((pick.confidence || 0) < 65) score -= 1;
+    else if ((pick.confidence || 0) >= 80) score += 0.5;
+
+    const text = `${pick.ticker} ${pick.action} ${pick.one_line_thesis || ''} ${pick.full_reasoning || ''}`.toLowerCase();
+    if (/earnings|fomc|cpi|fed|merger|buyout|approval|lawsuit|binary|event risk|headline/i.test(text)) {
+      score -= 1.25;
+      notes.push('tail-risk/event risk');
+    }
+    if (/crowded|overcrowded|too crowded|everyone|obvious|consensus trade/i.test(text)) {
+      score -= 1;
+      notes.push('crowding risk');
+    }
+
+    const candidates = Array.isArray(reviewCtx.allIdeas) ? reviewCtx.allIdeas : [];
+    const tickerKey = String(pick.ticker || '').toLowerCase();
+    const clusterCount = tickerKey ? candidates.filter(i => String(i.ticker || i.symbol || '').toLowerCase().includes(tickerKey)).length : 0;
+    if (clusterCount > 1) {
+      score -= Math.min(2, 0.5 * (clusterCount - 1));
+      notes.push('correlation cluster');
+    }
+
+    score = Math.max(0, Math.min(10, score));
+    const reject = score < 7;
+    const reviewed = {
+      ...rawPick,
+      ...pick,
+      hyper_score: Number(score.toFixed(1)),
+      hyper_notes: notes.join('; '),
+    };
+    if (!reject && score < 8) reviewed.size_pct = Math.min(Number(reviewed.size_pct || 0) || 0.5, 0.5);
+    return { reject, score, pick: reviewed };
+  }
+
+  function scoreSportsHyperPick(rawPick, reviewCtx = {}) {
+    const pick = normalizeSportsPick(rawPick);
+    if (!pick) return { reject: true, score: 0, pick: rawPick, reason: 'unparseable pick' };
+
+    const notes = [];
+    let score = 10;
+    const gameText = String(pick.game || '').toLowerCase();
+    const pickText = String(pick.pick || '').toLowerCase();
+    const betType = String(pick.bet_type || pick.market || '').toLowerCase();
+    const reasoning = `${pick.full_reasoning || pick.reasoning || ''} ${pick.pick || ''}`.toLowerCase();
+    const timeText = String(pick.game_time || '').toLowerCase();
+    const odds = Number(pick.odds || 0);
+    const conf = Number(pick.confidence || 0);
+
+    if (!pick.game || !pick.pick) { score -= 4; notes.push('missing game or pick'); }
+    if (/\bnone\b|\bno bet\b|\bpass\b|irrelevant|\breject\b/i.test(`${pickText} ${reasoning}`)) { score -= 8; notes.push('irrelevant / no-bet output'); }
+    if (/tbd|tba|unknown|postponed|delayed|live|in progress|final/i.test(timeText) || /tbd|tba|unknown|postponed|delayed|live|in progress|final/i.test(gameText)) {
+      return { reject: true, score: 0, pick, reason: 'live/TBD game' };
+    }
+
+    if (odds <= -220) { score -= 2; notes.push('heavy juice'); }
+    else if (odds <= -180) { score -= 0.75; notes.push('moderate juice'); }
+    else if (odds >= 160) { score -= 0.25; notes.push('high plus-price variance'); }
+
+    if (conf < 55) { score -= 2; notes.push('low confidence'); }
+    else if (conf < 65) { score -= 1; }
+    else if (conf >= 75) { score += 0.5; }
+
+    if (/revenge|must-win|desperate|trap game|statement|bounce back|due|narrative|lock/i.test(reasoning)) {
+      score -= 2;
+      notes.push('narrative trap risk');
+    }
+
+    if (/last 3|last 4|last 5|small sample|tiny sample|hot streak|cold streak/i.test(reasoning)) {
+      score -= 1;
+      notes.push('sample size concern');
+    }
+
+    const lineNotes = String(reviewCtx.lineMovements || '').toLowerCase();
+    const supportNotes = JSON.stringify(reviewCtx.supportAnalysis || reviewCtx.consensusBrief || {}).toLowerCase();
+    const teamKey = String(gameText || '').split('@').join(' ').split('vs').join(' ');
+    if (lineNotes && teamKey && !lineNotes.includes(teamKey.slice(0, 20).trim())) {
+      score -= 0.25;
+    }
+    if (/injur|scratch|out|questionable/.test(reasoning) && !/injur|scratch|out|questionable/.test(supportNotes)) {
+      score -= 1.5;
+      notes.push('injury not confirmed');
+    }
+    if (Array.isArray(pick.agreement_agent_ids) && pick.agreement_agent_ids.length >= 2) {
+      score += 0.5;
+    }
+    if (Array.isArray(pick.agreement_llms) && pick.agreement_llms.length >= 2) {
+      score += 0.25;
+    }
+
+    score = Math.max(0, Math.min(10, score));
+    const reject = score < 7;
+    const reviewed = {
+      ...pick,
+      hyper_score: Number(score.toFixed(1)),
+      hyper_notes: notes.join('; '),
+    };
+    if (!reject && score < 8) reviewed.units = Math.min(Number(reviewed.units || reviewed.stake_units || 1) || 1, 0.5);
+    if (!reject && !reviewed.units) reviewed.units = 0.5;
+    return { reject, score, pick: reviewed };
+  }
+
+  function applySportsFinalReview(picks, reviewParsed, reviewCtx = {}) {
     const approved = reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.final_picks || reviewParsed?.finalPicks;
     if (Array.isArray(approved) && approved.length) {
       return consolidateSportsFinalPicks(normalizeSportsFinalPicks(approved));
