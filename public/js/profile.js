@@ -95,6 +95,7 @@ const Profile = (() => {
             <button class="btn-sm test-btn" onclick="Profile.testAppsScript()">Test</button>
           </div>
           <div id="apps-script-status" class="test-result" style="margin-top:4px"></div>
+          <div id="sheets-auth-status" class="test-result" style="margin-top:4px">${(globalThis.SheetsClient?.getAppsScriptUrl?.() || keys.apps_script_url || getPersistedField('apps_script_url')) ? '✅ Sheets ready' : '⚠️ Sheets not connected yet'}</div>
         </div>
       </div>
 
@@ -137,6 +138,7 @@ const Profile = (() => {
       document.getElementById('save-password').value = '';
       // Update status bar
       const prov = document.getElementById('status-provider'); if (prov) prov.value = LLM.getProviderMode();
+      SAGE.updateSheetsStatus?.().catch?.(() => {});
     } catch (err) {
       UI.showToast(err.message, 'error');
     }
@@ -218,6 +220,8 @@ const Profile = (() => {
         const el = document.getElementById('sheets-auth-status');
         if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
         UI.showToast('Google Sheets connected ✅', 'success');
+      SAGE.updateSheetsStatus?.().catch?.(() => {});
+        SAGE.updateSheetsStatus?.().catch?.(() => {});
         if (popup && !popup.closed) popup.close();
       }
       if (popup && popup.closed && !token) clearInterval(timer);
@@ -278,8 +282,7 @@ const Profile = (() => {
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        // Refresh status bar
-        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
+        SAGE.updateSheetsStatus?.().catch?.(() => {});
         document.querySelectorAll('.status-item').forEach(el => {
           if (el.textContent.includes('Sheets')) {
             el.className = 'status-item ok';
@@ -320,7 +323,9 @@ const Profile = (() => {
       window.history.replaceState({}, document.title, window.location.pathname);
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
+      SAGE.updateSheetsStatus?.().catch?.(() => {});
       UI.showToast('Google Sheets connected ✅', 'success');
+      SAGE.updateSheetsStatus?.().catch?.(() => {});
     }
   }
 
@@ -511,7 +516,11 @@ const Profile = (() => {
     // Check sheets status
     const token = getSheetsToken();
     const el = document.getElementById('sheets-auth-status');
-    if (el && token) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
+    if (el) {
+      const url = globalThis.SheetsClient?.getAppsScriptUrl?.() || getPersistedField('apps_script_url');
+      if (token || url) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
+    }
+    SAGE.updateSheetsStatus?.().catch?.(() => {});
   }
 
   if (typeof window !== 'undefined' && !window.__sageSheetsMessageListenerAdded) {
@@ -526,11 +535,12 @@ const Profile = (() => {
       localStorage.setItem('sage_sheets_token_user', user);
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
+      SAGE.updateSheetsStatus?.().catch?.(() => {});
     });
   }
 
   return {
-    saveKeys, testKey, testOddsKey, testAppsScript, authorizeSheets, checkOAuthCallback, getSheetsToken,
+    saveKeys, testKey, testOddsKey, authorizeSheets, checkOAuthCallback, getSheetsToken,
     exportProfile, showImport, doImport,
     showChangePassword, doChangePassword, showDeleteAccount, doDeleteAccount,
     logout, showAuthScreen, showApp, doLogin, doRegister, openProfileModal,

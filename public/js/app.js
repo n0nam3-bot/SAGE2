@@ -84,6 +84,8 @@ const SAGE = (() => {
     _setLoadMsg('Building dashboard…');
     UI.renderAll();
     UI.updateStatus(state);
+    // refresh sheets status asynchronously in case auth/url state just changed
+    try { await SAGE.updateSheetsStatus?.(); } catch {}
 
     // Initialize sports date controls
     const sportsDate = document.getElementById('sports-date-filter');
