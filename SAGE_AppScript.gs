@@ -377,7 +377,7 @@ function writeLog(action, tab, rows, user, status) {
     const lastRow = logSheet.getLastRow();
     if (lastRow > 1) {
       const rowsData = logSheet.getRange(2, 1, lastRow - 1, logSheet.getLastColumn()).getValues();
-      const idx = rowsData.findIndex(r => String(r[4] || '').toLowerCase() === String(user || 'global').toLowerCase() && String(r[2] || '') === String(tab || ''));
+      const idx = rowsData.findIndex(r => String(r[4] || '').toLowerCase() === String(user || 'global').toLowerCase());
       if (idx >= 0) {
         logSheet.getRange(idx + 2, 1, 1, values.length).setValues([values]);
         SpreadsheetApp.flush();
