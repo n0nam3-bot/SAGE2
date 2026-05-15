@@ -197,120 +197,143 @@ const LLM = (() => {
     };
   }
 
-  // Merge multiple JSON responses from different providers into one unified result.
+  function getQuorumThreshold(providerCount) {
+    const n = Math.max(0, Number(providerCount) || 0);
+    if (n <= 1) return 1;
+    return Math.max(2, Math.ceil((n * 2) / 3));
+  }
 
-  // Strategy: parse each, union arrays, average scalar confidence fields.
-  function mergeProviderResponses(responses) {
-    const parsed = [];
-    for (const r of responses) {
-      try {
-        const m = r.text.match(/```(?:json)?\s*([\s\S]*?)```/) || r.text.match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
-        if (m) parsed.push({ provider: r.provider, data: JSON.parse(m[1] || m[0]) });
-        else parsed.push({ provider: r.provider, data: JSON.parse(r.text) });
-      } catch {
-        // If can't parse, keep raw text
-        parsed.push({ provider: r.provider, data: null, raw: r.text });
-      }
+  function normalizeQuorumKey(item = {}) {
+    const sport = String(item.sport || item.league || item.asset_class || '').toLowerCase().trim();
+    const game = String(item.game || item.event || item.matchup || item.symbol || item.ticker || item.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const market = String(item.bet_type || item.market || item.type || item.action || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const pick = String(item.pick || item.selection || item.winner || item.side || item.direction || item.ticker || item.symbol || item.name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const extra = [item.event_date, item.game_time, item.entry, item.target, item.stop].filter(v => v != null && String(v).trim() !== '').map(v => String(v).toLowerCase().trim());
+    return [sport, game, market, pick, ...extra].join('|');
+  }
+
+  function parseProviderPayload(text, provider) {
+    try {
+      const m = String(text || '').match(/```(?:json)?\s*([\s\S]*?)```/) || String(text || '').match(/(\[[\s\S]*?\]|\{[\s\S]*?\})/);
+      const payload = m ? JSON.parse(m[1] || m[0]) : JSON.parse(String(text || '').trim());
+      return { provider, data: payload };
+    } catch {
+      return { provider, data: null, raw: String(text || '') };
     }
+  }
 
+  function mergeProviderResponses(responses) {
+    const parsed = responses.map(r => parseProviderPayload(r.text, r.provider));
     const validParsed = parsed.filter(p => p.data != null);
     if (validParsed.length === 0) {
-      // All failed to parse — return the longest raw text
       const best = responses.reduce((a, b) => (a.text?.length || 0) > (b.text?.length || 0) ? a : b);
       return best.text;
     }
 
-    // If all are arrays (sports picks), merge them
-    if (validParsed.every(p => Array.isArray(p.data))) {
-      const allPicks = validParsed.flatMap(p => p.data.map(pick => ({ ...pick, _source_provider: p.provider })));
-      const deduped = dedupePicksByKey(allPicks);
-      // Average confidence across duplicate picks
-      const avgd = boostConsensusConfidence(allPicks, deduped);
-      return JSON.stringify(avgd);
-    }
+    const quorumRequired = getQuorumThreshold(validParsed.length);
 
-    // If all are objects, merge fields
-    if (validParsed.every(p => !Array.isArray(p.data) && typeof p.data === 'object')) {
-      const merged = mergeJsonObjects(validParsed.map(p => p.data));
-      // Mark which providers agreed
-      merged._consensus_providers = validParsed.map(p => p.provider);
+    if (validParsed.every(p => Array.isArray(p.data))) {
+      const allItems = validParsed.flatMap(p => p.data.map(item => ({ ...item, _source_provider: p.provider })));
+      const merged = mergeArrayItemsWithQuorum(allItems, quorumRequired, validParsed.length);
       return JSON.stringify(merged);
     }
 
-    // Mixed — return best (highest confidence or longest)
+    if (validParsed.every(p => !Array.isArray(p.data) && typeof p.data === 'object')) {
+      const merged = mergeJsonObjectsWithQuorum(validParsed, quorumRequired);
+      merged._consensus_providers = validParsed.map(p => p.provider);
+      merged._quorum_required = quorumRequired;
+      merged._provider_count = validParsed.length;
+      return JSON.stringify(merged);
+    }
+
     const best = validParsed.reduce((a, b) => {
       const sa = Array.isArray(a.data) ? a.data.length : (a.data?.conviction || a.data?.confidence || 0);
       const sb = Array.isArray(b.data) ? b.data.length : (b.data?.conviction || b.data?.confidence || 0);
       return sa >= sb ? a : b;
     });
-    best.data._consensus_providers = validParsed.map(p => p.provider);
+    if (best.data && typeof best.data === 'object') {
+      best.data._consensus_providers = validParsed.map(p => p.provider);
+      best.data._quorum_required = quorumRequired;
+      best.data._provider_count = validParsed.length;
+    }
     return JSON.stringify(best.data);
   }
 
-  function dedupePicksByKey(picks) {
-    const seen = new Map();
-    for (const pick of picks) {
-      const key = [
-        (pick.sport || '').toLowerCase(),
-        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
-        (pick.bet_type || '').toLowerCase(),
-        (pick.pick || '').toLowerCase().slice(0, 20),
-      ].join('|');
-      if (!seen.has(key)) seen.set(key, []);
-      seen.get(key).push(pick);
+  function mergeArrayItemsWithQuorum(items, quorumRequired, providerCount) {
+    const groups = new Map();
+    for (const item of Array.isArray(items) ? items : []) {
+      const key = normalizeQuorumKey(item);
+      if (!groups.has(key)) {
+        groups.set(key, { items: [], providers: new Set() });
+      }
+      const group = groups.get(key);
+      group.items.push(item);
+      if (item._source_provider) group.providers.add(item._source_provider);
     }
-    return [...seen.values()].map(group => group[0]); // take first of each group
+
+    const out = [];
+    for (const group of groups.values()) {
+      const providerList = [...group.providers].filter(Boolean);
+      const required = Math.max(1, quorumRequired || getQuorumThreshold(providerCount || providerList.length));
+      if (providerList.length < required) continue;
+      const representative = group.items.reduce((best, current) => {
+        const bestScore = Number(best?.confidence || best?.score || 0) + (String(best?.reasoning || best?.full_reasoning || '').length / 100);
+        const currentScore = Number(current?.confidence || current?.score || 0) + (String(current?.reasoning || current?.full_reasoning || '').length / 100);
+        return currentScore > bestScore ? current : best;
+      }, group.items[0]);
+      const numericConfidence = group.items.map(p => Number(p.confidence) || 0).filter(Number.isFinite);
+      const confidence = numericConfidence.length ? Math.round(numericConfidence.reduce((a, b) => a + b, 0) / numericConfidence.length) : (Number(representative.confidence) || 0);
+      const agentAgreements = [...new Set(group.items.flatMap(p => Array.isArray(p.agents_in_agreement) ? p.agents_in_agreement : []).filter(Boolean))];
+      const llms = [...providerList];
+      out.push({
+        ...representative,
+        confidence: Math.min(95, Math.max(0, confidence + Math.max(0, providerList.length - 1) * 3)),
+        agents_in_agreement: agentAgreements.length ? agentAgreements : llms.map(p => `${p} LLM`),
+        agreement_llms: llms,
+        agreement_count: Math.max(providerList.length, agentAgreements.length, llms.length),
+        _provider_count: providerList.length,
+        _quorum_required: required,
+        _consensus_providers: llms,
+      });
+    }
+
+    out.sort((a, b) => (Number(b._provider_count) - Number(a._provider_count)) || (Number(b.confidence) - Number(a.confidence)));
+    return out;
   }
 
-  function boostConsensusConfidence(allPicks, deduped) {
-    return deduped.map(pick => {
-      const key = [
-        (pick.sport || '').toLowerCase(),
-        (pick.game || pick.event || '').toLowerCase().slice(0, 30),
-        (pick.bet_type || '').toLowerCase(),
-        (pick.pick || '').toLowerCase().slice(0, 20),
-      ].join('|');
-      const matches = allPicks.filter(p => [
-        (p.sport || '').toLowerCase(),
-        (p.game || p.event || '').toLowerCase().slice(0, 30),
-        (p.bet_type || '').toLowerCase(),
-        (p.pick || '').toLowerCase().slice(0, 20),
-      ].join('|') === key);
-      const avgConf = matches.reduce((s, p) => s + (Number(p.confidence) || 50), 0) / matches.length;
-      const agreementBoost = (matches.length - 1) * 5; // +5 per extra provider that agrees
-      const providers = [...new Set(matches.map(p => p._source_provider).filter(Boolean))];
-      const agentAgreements = [...new Set(matches.flatMap(p => Array.isArray(p.agents_in_agreement) ? p.agents_in_agreement : []).filter(Boolean))];
-      return {
-        ...pick,
-        confidence: Math.min(95, Math.round(avgConf + agreementBoost)),
-        agents_in_agreement: agentAgreements.length ? agentAgreements : providers.map(p => p + ' LLM'),
-        agreement_llms: providers,
-        _provider_count: matches.length,
-      };
-    });
-  }
-
-  function mergeJsonObjects(objects) {
+  function mergeJsonObjectsWithQuorum(entries, quorumRequired) {
     const merged = {};
-    for (const obj of objects) {
-      for (const [key, val] of Object.entries(obj)) {
-        if (!(key in merged)) { merged[key] = val; continue; }
-        // Arrays: concatenate and dedupe
-        if (Array.isArray(merged[key]) && Array.isArray(val)) {
-          merged[key] = [...merged[key], ...val.filter(v =>
-            !merged[key].some(existing => JSON.stringify(existing) === JSON.stringify(v))
-          )];
-          continue;
-        }
-        // Numbers: average
-        if (typeof merged[key] === 'number' && typeof val === 'number') {
-          merged[key] = (merged[key] + val) / 2;
-          continue;
-        }
-        // Strings: keep the longer/more detailed one
-        if (typeof merged[key] === 'string' && typeof val === 'string') {
-          if (val.length > merged[key].length) merged[key] = val;
-        }
+    const keys = [...new Set(entries.flatMap(entry => Object.keys(entry.data || {})))];
+    for (const key of keys) {
+      const values = entries.map(entry => ({ provider: entry.provider, value: entry.data?.[key] })).filter(v => v.value !== undefined);
+      if (!values.length) continue;
+
+      const arrays = values.filter(v => Array.isArray(v.value));
+      if (arrays.length === values.length) {
+        const items = arrays.flatMap(v => v.value.map(item => ({ ...item, _source_provider: v.provider })));
+        const mergedArray = mergeArrayItemsWithQuorum(items, quorumRequired, entries.length);
+        if (mergedArray.length) merged[key] = mergedArray;
+        continue;
+      }
+
+      const nestedObjects = values.filter(v => v.value && typeof v.value === 'object' && !Array.isArray(v.value));
+      if (nestedObjects.length === values.length) {
+        merged[key] = mergeJsonObjectsWithQuorum(nestedObjects.map(v => ({ provider: v.provider, data: v.value })), quorumRequired);
+        continue;
+      }
+
+      const numericValues = values.map(v => Number(v.value)).filter(v => Number.isFinite(v));
+      if (numericValues.length === values.length && values.length) {
+        merged[key] = numericValues.reduce((a, b) => a + b, 0) / numericValues.length;
+        continue;
+      }
+
+      const nonEmptyStrings = values.map(v => String(v.value).trim()).filter(Boolean);
+      if (nonEmptyStrings.length) {
+        const counts = new Map();
+        for (const str of nonEmptyStrings) counts.set(str, (counts.get(str) || 0) + 1);
+        const [best] = [...counts.entries()].sort((a, b) => (b[1] - a[1]) || (b[0].length - a[0].length));
+        merged[key] = best ? best[0] : nonEmptyStrings.sort((a, b) => b.length - a.length)[0];
       }
     }
     return merged;
