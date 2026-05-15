@@ -114,7 +114,7 @@ var SheetsClient = globalThis.SheetsClient = (() => {
 
   // ── Apps Script webhook append ──
   async function appendViaAppsScript(scriptUrl, tab, rows, extra = {}) {
-    const payload = { action: 'append', tab, rows, username: currentUsername(), ...extra };
+    const payload = { action: extra.action || 'append', tab, rows, username: currentUsername(), ...extra };
     // Apps Script requires no-cors or JSONP; use fetch with mode no-cors
     // and send data via URL params for GETs or form POST
     await fetch(scriptUrl, {
@@ -159,6 +159,28 @@ var SheetsClient = globalThis.SheetsClient = (() => {
         console.warn('[Sheets] Token expired. Re-authorize in Profile → Google Sheets.');
       }
       throw new Error(err.error?.message || `Sheets API ${res.status}`);
+    }
+  }
+
+  // ── Overwrite a whole tab (used by Fresh Odds + sync tabs) ──
+  async function overwriteRows(tab, rows) {
+    try {
+      if (isLocal()) {
+        await fetch('/api/sheets/overwrite', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tab, rows }),
+        });
+        return;
+      }
+      const scriptUrl = getAppsScriptUrl();
+      if (scriptUrl) {
+        await appendViaAppsScript(scriptUrl, tab, rows, { username: currentUsername(), action: 'overwrite' });
+        return;
+      }
+      await overwriteRowsDirect(tab, rows);
+    } catch (err) {
+      console.warn('[Sheets] overwrite failed:', err.message);
     }
   }
 
