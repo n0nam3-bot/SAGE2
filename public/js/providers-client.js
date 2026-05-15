@@ -104,6 +104,25 @@ const LLM = (() => {
     return [preferredProvider, ...PROVIDER_ORDER.filter(p => p !== preferredProvider)];
   }
 
+  async function getRuntimeProviderAvailability() {
+    const fallback = { ollama: false, gemini: true, groq: true, openrouter: true };
+    try {
+      if (!IS_LOCAL) return fallback;
+      const res = await fetch('/api/providers');
+      if (!res.ok) return fallback;
+      const data = await res.json().catch(() => ({}));
+      const providers = data?.status || data?.providers || data || {};
+      return {
+        ollama: !!providers.ollama?.available || !!providers.ollama,
+        gemini: !!providers.gemini?.available || !!providers.gemini,
+        groq: !!providers.groq?.available || !!providers.groq,
+        openrouter: !!providers.openrouter?.available || !!providers.openrouter,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
   // ── Main chat function ──
   async function chat({ system, messages, maxTokens = 2000, forceProvider = null }) {
     const providerMode = forceProvider || getProviderMode();
@@ -122,16 +141,16 @@ const LLM = (() => {
   async function chatMultiProvider({ system, messages, maxTokens = 2000 }) {
     clearExpiredCooldowns();
     const keys = Auth.getKeys();
+    const runtime = await getRuntimeProviderAvailability();
     const configured = [];
-    if (IS_LOCAL) configured.push('ollama');
-    if (keys.gemini)     configured.push('gemini');
-    if (keys.groq)       configured.push('groq');
-    if (keys.openrouter) configured.push('openrouter');
+    if (runtime.ollama || IS_LOCAL) configured.push('ollama');
+    if (keys.gemini && runtime.gemini !== false) configured.push('gemini');
+    if (keys.groq && runtime.groq !== false) configured.push('groq');
+    if (keys.openrouter && runtime.openrouter !== false) configured.push('openrouter');
 
     const eligible = configured.filter(provider => getProviderCooldownRemaining(provider) <= 0);
     const cooling = configured.filter(provider => getProviderCooldownRemaining(provider) > 0);
 
-    // If only one (or zero) eligible providers, fall back to regular chat
     if (eligible.length <= 1) {
       if (eligible.length === 1) return chat({ system, messages, maxTokens, forceProvider: eligible[0] });
       if (cooling.length) {
@@ -142,7 +161,6 @@ const LLM = (() => {
       return chat({ system, messages, maxTokens });
     }
 
-    // Call all eligible providers in parallel
     const results = await Promise.allSettled(
       eligible.map(provider => callCascade({ system, messages, maxTokens, preferredProvider: provider }))
     );
@@ -158,7 +176,7 @@ const LLM = (() => {
       if (provider && remaining > 0) {
         throw new Error(`${providerName} is cooling down for ${remaining}s. Try another provider or wait a moment.`);
       }
-      throw new Error('All providers failed in consensus mode');
+      throw new Error('All providers failed in hyper mode');
     }
     if (successes.length === 1) return {
       text: successes[0].text,
@@ -168,11 +186,10 @@ const LLM = (() => {
       providerOutputs: successes,
     };
 
-    // Merge the responses for the agent to read, but preserve every provider output
     const merged = mergeProviderResponses(successes);
     return {
       text: merged,
-      provider: `consensus(${successes.map(s=>s.provider).join('+')})`,
+      provider: `hyper(${successes.map(s=>s.provider).join('+')})`,
       model: 'multi',
       consensus: true,
       providerCount: successes.length,
@@ -181,6 +198,7 @@ const LLM = (() => {
   }
 
   // Merge multiple JSON responses from different providers into one unified result.
+
   // Strategy: parse each, union arrays, average scalar confidence fields.
   function mergeProviderResponses(responses) {
     const parsed = [];
