@@ -79,18 +79,6 @@ const LLM = (() => {
     if (changed) writeProviderCooldowns(state);
   }
 
-  async function getRuntimeProviderAvailability() {
-    if (!IS_LOCAL) return {};
-    try {
-      const res = await fetch('/api/providers');
-      if (!res.ok) return {};
-      const data = await res.json();
-      return data?.status || {};
-    } catch {
-      return {};
-    }
-  }
-
   function getProviderMode() {
     const stored = (localStorage.getItem(PROVIDER_MODE_KEY) || 'auto').toLowerCase();
     return VALID_PROVIDER_MODES.has(stored) ? stored : 'auto';
@@ -135,8 +123,7 @@ const LLM = (() => {
     clearExpiredCooldowns();
     const keys = Auth.getKeys();
     const configured = [];
-    const runtimeAvailability = await getRuntimeProviderAvailability();
-    if ((IS_LOCAL || runtimeAvailability?.ollama?.available) && !configured.includes('ollama')) configured.push('ollama');
+    if (IS_LOCAL) configured.push('ollama');
     if (keys.gemini)     configured.push('gemini');
     if (keys.groq)       configured.push('groq');
     if (keys.openrouter) configured.push('openrouter');
