@@ -133,7 +133,6 @@ const Profile = (() => {
       persistProfileField('apps_script_url', keys.apps_script_url);
       localStorage.setItem('sage_sheet_id', keys.sheet_id || '');
       if (keys.apps_script_url) globalThis.SheetsClient?.setAppsScriptUrl?.(keys.apps_script_url);
-      globalThis.SAGE?.updateSheetsStatus?.().catch?.(() => {});
       UI.showToast('Keys saved and encrypted ✅', 'success');
       document.getElementById('save-password').value = '';
       // Update status bar
@@ -279,12 +278,14 @@ const Profile = (() => {
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        globalThis.SAGE?.updateSheetsStatus?.().catch?.(() => {});
-        const sheetsBar = document.getElementById('status-bar');
-        if (sheetsBar) {
-          const item = [...sheetsBar.querySelectorAll('.status-item')].find(el => el.textContent.includes('Sheets'));
-          if (item) { item.className = 'status-item ok'; item.innerHTML = '✅ Sheets'; }
-        }
+        // Refresh status bar
+        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
+        document.querySelectorAll('.status-item').forEach(el => {
+          if (el.textContent.includes('Sheets')) {
+            el.className = 'status-item ok';
+            el.innerHTML = '✅ Sheets';
+          }
+        });
       } else if (text.includes('script.google.com') || text.includes('<!DOCTYPE')) {
         if (statusEl) {
           statusEl.textContent = '⚠️ Got HTML instead of JSON — deployment may need "Execute as: Me" and "Who has access: Anyone"';
@@ -320,7 +321,6 @@ const Profile = (() => {
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
       UI.showToast('Google Sheets connected ✅', 'success');
-      globalThis.SAGE?.updateSheetsStatus?.().catch?.(() => {});
     }
   }
 
