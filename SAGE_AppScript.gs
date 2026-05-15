@@ -206,9 +206,8 @@ function doPost(e) {
     }
 
     if (action === 'mark_outcome') {
-      // payload: { action, tab, sessionId, identifier, outcome: "win"|"loss", pnl }
-      const { sessionId, identifier, outcome, pnl } = payload;
-      markOutcome(tab || TABS.SPORTS, sessionId, identifier, outcome, pnl);
+      // payload: { action, tab, sessionId, identifier, outcome: "win"|"loss", pnl, runningRoi, agentWeight }
+      markOutcome(payload || {});
       writeLog('mark_outcome', tab, 1, user, 'ok');
       return jsonResponse({ success: true, action: 'mark_outcome' });
     }
@@ -326,42 +325,66 @@ function upsertAgentRow(row) {
   }
 }
 
-function markOutcome(tabName, sessionId, identifier, outcome, pnl) {
+
+function markOutcome(payload = {}) {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const tabName = payload.tab || TABS.SPORTS;
   const sheet = ss.getSheetByName(tabName);
   if (!sheet || sheet.getLastRow() < 2) return;
 
   const numCols = sheet.getLastColumn();
   const headers = sheet.getRange(1, 1, 1, numCols).getValues()[0];
+  const sessionCol = headers.findIndex(h => String(h).toLowerCase().includes('session')) + 1;
+  const gameCol    = headers.findIndex(h => String(h).toLowerCase() === 'game') + 1;
+  const eventDateCol = headers.findIndex(h => String(h).toLowerCase().includes('event date')) + 1;
+  const betTypeCol = headers.findIndex(h => String(h).toLowerCase().includes('bet type')) + 1;
+  const pickCol    = headers.findIndex(h => String(h).toLowerCase() === 'pick') + 1;
   const outcomeCol = headers.findIndex(h => String(h).toLowerCase() === 'outcome') + 1;
   const pnlCol     = headers.findIndex(h => String(h).toLowerCase().includes('p&l')) + 1;
-  const sessionCol = headers.findIndex(h => String(h).toLowerCase().includes('session')) + 1;
-  const pickCol    = headers.findIndex(h => String(h).toLowerCase() === 'pick') + 1;
+  const roiCol     = headers.findIndex(h => String(h).toLowerCase().includes('running roi')) + 1;
+  const weightCol  = headers.findIndex(h => String(h).toLowerCase().includes('agent weight')) + 1;
 
   if (!outcomeCol) return;
+  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
+  const norm = v => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
-  const data    = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
+  let hitIndex = -1;
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const matchSession = !sessionId || String(row[sessionCol - 1]) === String(sessionId);
-    const matchPick    = !identifier || String(row[pickCol - 1]).toLowerCase().includes(identifier.toLowerCase());
-    const alreadyMarked = row[outcomeCol - 1] !== '';
-
-    if (matchSession && matchPick && !alreadyMarked) {
-      const sheetRow = i + 2;
-      sheet.getRange(sheetRow, outcomeCol).setValue(outcome === 'win' ? 'WIN ✅' : 'LOSS ❌');
-      if (pnlCol && pnl !== undefined) {
-        sheet.getRange(sheetRow, pnlCol).setValue(pnl);
-      }
-      // Color the row
-      const rowRange = sheet.getRange(sheetRow, 1, 1, numCols);
-      rowRange.setBackground(outcome === 'win' ? COLORS.win : COLORS.loss);
-      break; // mark first unresolved match only
+    const sameSession = !payload.sessionId || String(row[sessionCol - 1]) === String(payload.sessionId);
+    const sameGame = !payload.game || (gameCol && norm(row[gameCol - 1]) === norm(payload.game));
+    const samePick = !payload.pick || (pickCol && norm(row[pickCol - 1]) === norm(payload.pick));
+    const sameBet = !payload.betType || (betTypeCol && norm(row[betTypeCol - 1]) === norm(payload.betType));
+    const sameDate = !payload.eventDate || (eventDateCol && norm(row[eventDateCol - 1]) === norm(payload.eventDate));
+    const notMarked = row[outcomeCol - 1] === '';
+    if (sameSession && sameGame && samePick && sameBet && sameDate && notMarked) {
+      hitIndex = i + 2;
+      break;
     }
   }
+  if (hitIndex < 0) return;
+
+  sheet.getRange(hitIndex, outcomeCol).setValue(String(payload.outcome || '').toLowerCase().includes('win') ? 'WIN ✅' : 'LOSS ❌');
+  if (pnlCol && payload.pnl !== undefined) sheet.getRange(hitIndex, pnlCol).setValue(payload.pnl);
+  if (weightCol && payload.agentWeight !== undefined) sheet.getRange(hitIndex, weightCol).setValue(payload.agentWeight);
+
+  if (roiCol) {
+    let totalPnl = 0;
+    let totalRisk = 0;
+    for (let r = 2; r <= sheet.getLastRow(); r++) {
+      const out = String(sheet.getRange(r, outcomeCol).getValue() || '').trim();
+      if (!out) continue;
+      const units = Number(sheet.getRange(r, 13).getValue() || 0) || 0;
+      const p = Number(sheet.getRange(r, pnlCol).getValue() || 0) || 0;
+      totalPnl += p;
+      totalRisk += Math.abs(units);
+      sheet.getRange(r, roiCol).setValue(totalRisk > 0 ? ((totalPnl / totalRisk) * 100).toFixed(1) : '0.0');
+    }
+  }
+
+  sheet.getRange(hitIndex, 1, 1, numCols).setBackground(String(payload.outcome || '').toLowerCase().includes('win') ? COLORS.win : COLORS.loss);
   SpreadsheetApp.flush();
 }
-
 function writeLog(action, tab, rows, user, status) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();

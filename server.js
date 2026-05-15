@@ -163,7 +163,7 @@ async function ensureSheetsDirect(token, sheetId) {
   const required = ['Trading Picks', 'Sports Picks', 'Agent Performance', 'Equity Curve'];
   const headers = {
     'Trading Picks':    ['Date','Session','Agent','Layer','Symbol','Action','Entry','Target','Stop','Confidence','Weight','Thesis','Timeframe','Outcome','Return %','Sharpe','Regime','Notes'],
-    'Sports Picks':     ['Date','Session','Agent','Sport','Game','Bet Type','Pick','Odds','Implied Prob %','Confidence','Units','Outcome','P&L (units)','Running ROI %','Agent Weight','Reasoning'],
+    'Sports Picks':     ['Date','Session','Source Agent','Sport','Game','Event Date','Game Time','Bet Type','Pick','Odds (American)','Implied Prob %','Confidence','Units','Outcome','P&L (units)','Running ROI %','Agent Weight','Reasoning','Agents in Agreement'],
     'Agent Performance':['Agent ID','Name','Domain','Layer','Weight','Predictions','Correct','Accuracy %','Sharpe','ROI %','Rewrites','Last Rewrite','Delta','Blind Spots','Status'],
     'Equity Curve':     ['Date','Session','Domain','Value','Daily Return %','Drawdown %','Regime','Top Agent','Notes'],
   };
@@ -192,6 +192,108 @@ async function ensureSheetsDirect(token, sheetId) {
       }
     }
   }
+}
+
+
+function normSheetCell(v) { return String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' '); }
+function normalizeOutcomeLabel(v) {
+  const s = normSheetCell(v);
+  if (!s) return '';
+  if (s.startsWith('win') || s.includes('✅')) return 'WIN ✅';
+  if (s.startsWith('loss') || s.includes('❌')) return 'LOSS ❌';
+  return String(v || '');
+}
+function calcRunningRoiRows(rows, outcomeIdx = 13, pnlIdx = 14, unitsIdx = 12) {
+  let totalPnl = 0;
+  let totalRisk = 0;
+  for (const row of rows || []) {
+    const out = normSheetCell(row[outcomeIdx] || '');
+    if (!out) continue;
+    const units = Number(row[unitsIdx] || 0) || 0;
+    const pnl = Number(row[pnlIdx] || 0) || 0;
+    totalPnl += pnl;
+    totalRisk += Math.abs(units);
+  }
+  return totalRisk > 0 ? ((totalPnl / totalRisk) * 100).toFixed(1) : '0.0';
+}
+async function markOutcomeViaBearerToken({ token, sheetId, tab, payload }) {
+  const range = encodeURIComponent(`'${tab}'!A:S`);
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, { headers: { 'Authorization': `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Sheets read ${res.status}`);
+  const data = await res.json();
+  const rows = data.values || [];
+  if (rows.length < 2) return false;
+  const headers = rows[0];
+  const cols = {
+    session: headers.findIndex(h => /session/i.test(String(h))) + 1,
+    game: headers.findIndex(h => /^game$/i.test(String(h))) + 1,
+    eventDate: headers.findIndex(h => /event date/i.test(String(h))) + 1,
+    betType: headers.findIndex(h => /bet type/i.test(String(h))) + 1,
+    pick: headers.findIndex(h => /^pick$/i.test(String(h))) + 1,
+    outcome: headers.findIndex(h => /^outcome$/i.test(String(h))) + 1,
+    pnl: headers.findIndex(h => /p&l/i.test(String(h))) + 1,
+    roi: headers.findIndex(h => /running roi/i.test(String(h))) + 1,
+    weight: headers.findIndex(h => /agent weight/i.test(String(h))) + 1,
+  };
+  const idx = rows.findIndex((row, i) => i > 0 &&
+    (!payload.sessionId || String(row[cols.session - 1] || '') === String(payload.sessionId)) &&
+    (!payload.game || normSheetCell(row[cols.game - 1]) === normSheetCell(payload.game)) &&
+    (!payload.pick || normSheetCell(row[cols.pick - 1]) === normSheetCell(payload.pick)) &&
+    (!payload.betType || normSheetCell(row[cols.betType - 1]) === normSheetCell(payload.betType)) &&
+    (!payload.eventDate || normSheetCell(row[cols.eventDate - 1]) === normSheetCell(payload.eventDate))
+  );
+  if (idx < 1) return false;
+  const row = [...rows[idx]];
+  if (cols.outcome > 0) row[cols.outcome - 1] = normalizeOutcomeLabel(payload.outcome);
+  if (cols.pnl > 0 && payload.pnl !== undefined) row[cols.pnl - 1] = payload.pnl;
+  if (cols.weight > 0 && payload.agentWeight !== undefined) row[cols.weight - 1] = payload.agentWeight;
+  if (cols.roi > 0) {
+    const updated = rows.map((r, i) => (i === idx ? row : r));
+    row[cols.roi - 1] = calcRunningRoiRows(updated.slice(1), 13, 14, 12);
+  }
+    const rowRange = encodeURIComponent(`'${tab}'!A${idx + 1}`);
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rowRange}?valueInputOption=USER_ENTERED`, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: [row] }),
+  });
+  return true;
+}
+async function markOutcomeViaServer(sheets, tab, payload) {
+  const range = `'${tab}'!A1:S5000`;
+  const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
+  const rows = resp.data.values || [];
+  if (rows.length < 2) return false;
+  const headers = rows[0];
+  const cols = {
+    session: headers.findIndex(h => /session/i.test(String(h))) + 1,
+    game: headers.findIndex(h => /^game$/i.test(String(h))) + 1,
+    eventDate: headers.findIndex(h => /event date/i.test(String(h))) + 1,
+    betType: headers.findIndex(h => /bet type/i.test(String(h))) + 1,
+    pick: headers.findIndex(h => /^pick$/i.test(String(h))) + 1,
+    outcome: headers.findIndex(h => /^outcome$/i.test(String(h))) + 1,
+    pnl: headers.findIndex(h => /p&l/i.test(String(h))) + 1,
+    roi: headers.findIndex(h => /running roi/i.test(String(h))) + 1,
+    weight: headers.findIndex(h => /agent weight/i.test(String(h))) + 1,
+  };
+  const idx = rows.findIndex((row, i) => i > 0 &&
+    (!payload.sessionId || String(row[cols.session - 1] || '') === String(payload.sessionId)) &&
+    (!payload.game || normSheetCell(row[cols.game - 1]) === normSheetCell(payload.game)) &&
+    (!payload.pick || normSheetCell(row[cols.pick - 1]) === normSheetCell(payload.pick)) &&
+    (!payload.betType || normSheetCell(row[cols.betType - 1]) === normSheetCell(payload.betType)) &&
+    (!payload.eventDate || normSheetCell(row[cols.eventDate - 1]) === normSheetCell(payload.eventDate))
+  );
+  if (idx < 1) return false;
+  const row = [...rows[idx]];
+  if (cols.outcome > 0) row[cols.outcome - 1] = normalizeOutcomeLabel(payload.outcome);
+  if (cols.pnl > 0 && payload.pnl !== undefined) row[cols.pnl - 1] = payload.pnl;
+  if (cols.weight > 0 && payload.agentWeight !== undefined) row[cols.weight - 1] = payload.agentWeight;
+  if (cols.roi > 0) {
+    const updated = rows.map((r, i) => (i === idx ? row : r));
+    row[cols.roi - 1] = calcRunningRoiRows(updated.slice(1), 13, 14, 12);
+  }
+  await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `'${tab}'!A${idx + 1}`, valueInputOption: 'USER_ENTERED', resource: { values: [row] } });
+  return true;
 }
 
 app.post('/api/sheets/append', async (req, res) => {
@@ -258,6 +360,23 @@ app.post('/api/sheets/upsert-agent', async (req, res) => {
 // ──────────────────────────────────────────────
 // SHEETS READ — cross-device sync
 // ──────────────────────────────────────────────
+
+app.post('/api/sheets/mark-outcome', async (req, res) => {
+  const { tab = 'Sports Picks', payload = {}, token, sheetId } = req.body || {};
+  try {
+    if (token && sheetId) {
+      await ensureSheetsDirect(token, sheetId).catch(() => {});
+      await markOutcomeViaBearerToken({ token, sheetId, tab, payload });
+      return res.json({ success: true, mode: 'direct' });
+    }
+    const sheets = await getSheetsClient();
+    if (!sheets) return res.status(401).json({ error: 'Not authorized with Google Sheets' });
+    await ensureSheets(sheets);
+    await markOutcomeViaServer(sheets, tab, payload);
+    res.json({ success: true, mode: 'server' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/sheets/read', async (req, res) => {
   const { tab, limit = 100 } = req.query;
   if (!tab) return res.status(400).json({ error: 'tab required' });
