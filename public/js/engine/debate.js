@@ -15,6 +15,21 @@ const DebateEngine = (() => {
     return /\d/.test(s) && !/\blive\b|\bfinal\b|\bpostponed\b|\bdelayed\b/i.test(s);
   }
 
+  function normalizeText(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+
+  function normalizeSportKey(value) {
+    const s = String(value || '').toUpperCase();
+    if (!s) return '';
+    if (s.includes('NFL')) return 'NFL';
+    if (s.includes('NBA')) return 'NBA';
+    if (s.includes('MLB')) return 'MLB';
+    if (s.includes('NHL')) return 'NHL';
+    if (s.includes('MMA') || s.includes('UFC') || s.includes('MIXED MARTIAL ARTS')) return 'MMA';
+    return s.replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] || s;
+  }
+
   function isIrrelevantBetLabel(value) {
     const s = String(value || '').trim().toLowerCase();
     if (!s) return true;
@@ -496,6 +511,8 @@ Provide your picks in the specified JSON format.`;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
     if (!hasSpecificGameTime(gameTime)) return null;
 
+    if (/live|in progress|final|postponed|delayed/i.test(`${pick} ${game} ${eventDate} ${gameTime}`)) return null;
+
     const confidence = normalizeConfidence(
       obj.confidence ?? obj.confidence_pct ?? obj.original_bet?.confidence ?? obj.score
     );
@@ -505,7 +522,7 @@ Provide your picks in the specified JSON format.`;
 
     return {
       ...obj,
-      sport,
+      sport: normalizeSportKey(sport || ''),
       game,
       event_date: eventDate,
       game_time: gameTime,
@@ -575,12 +592,13 @@ Provide your picks in the specified JSON format.`;
     const gameTime = raw.game_time ?? raw.time ?? raw.start_time ?? raw.original_bet?.game_time ?? '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
     if (!hasSpecificGameTime(gameTime)) return null;
+    if (/\blive\b|\bin progress\b|\bfinal\b|\bpostponed\b|\bdelayed\b/i.test(`${pick} ${game} ${eventDate} ${gameTime}`)) return null;
 
     if (isIrrelevantBetLabel(pick)) return null;
 
     const normalized = {
       ...raw,
-      sport: raw.sport || raw.original_bet?.sport || '',
+      sport: normalizeSportKey(raw.sport || raw.original_bet?.sport || ''),
       game,
       event_date: eventDate,
       game_time: gameTime,
@@ -622,10 +640,10 @@ Provide your picks in the specified JSON format.`;
     const family = normalizeMarketFamily(p.bet_type || p.market);
     const pick = normalizePickLabel(p.pick, family);
     return [
-      (p.sport || '').toLowerCase(),
-      (p.game || p.event || '').toLowerCase(),
+      normalizeSportKey(p.sport || ''),
+      normalizeText(p.game || p.event || ''),
       family,
-      pick,
+      normalizeText(pick),
     ].join('|');
   }
 
@@ -707,7 +725,7 @@ Provide your picks in the specified JSON format.`;
 
     const topAgreements = [...groups.values()]
       .map(g => ({
-        sport: g.sport,
+        sport: normalizeSportKey(g.sport),
         game: g.game,
         market: g.market,
         pick: g.pick,
@@ -728,7 +746,7 @@ Provide your picks in the specified JSON format.`;
       const agentIds = [...g.sourceAgents].filter(Boolean);
       const llmList = [...g.llms].filter(Boolean);
       pickAgreementMap[key] = {
-        sport: g.sport,
+        sport: normalizeSportKey(g.sport),
         game: g.game,
         market: g.market,
         pick: g.pick,
@@ -770,9 +788,9 @@ Provide your picks in the specified JSON format.`;
 
   function findMatchingScheduledGame(pick, scheduleData) {
     const gamesBySport = normalizeScheduleData(scheduleData);
-    const sport = String(pick.sport || '').toUpperCase();
+    const sport = normalizeSportKey(pick.sport || '');
     const candidates = gamesBySport[sport] || [];
-    const gameText = String(pick.game || '').toLowerCase();
+    const gameText = normalizeText(pick.game || '');
     const pickTeams = gameText.replace(/\(game\s*\d+\)/ig, '').replace(/\s+/g, ' ').trim();
     const now = Date.now();
 
@@ -783,8 +801,8 @@ Provide your picks in the specified JSON format.`;
       if (!Number.isFinite(startMs) || startMs <= now) continue;
       if (gameStatus && gameStatus !== 'pre') continue;
       if (!validTime) continue;
-      const away = String(game.awayTeam || '').toLowerCase();
-      const home = String(game.homeTeam || '').toLowerCase();
+      const away = normalizeText(game.awayTeam || '');
+      const home = normalizeText(game.homeTeam || '');
       if (!away || !home) continue;
       const matchesAwayHome = pickTeams.includes(away) && pickTeams.includes(home);
       const matchesHomeAway = pickTeams.includes(home) && pickTeams.includes(away);
@@ -803,6 +821,7 @@ Provide your picks in the specified JSON format.`;
       const scheduled = findMatchingScheduledGame(normalized, scheduleData);
       const finalPick = {
         ...normalized,
+        sport: normalizeSportKey(normalized.sport || ''),
         game_time: scheduled?.time || normalized.game_time,
         agents_in_agreement: agreement.agents_in_agreement || normalized.agents_in_agreement || [],
         agreement_agent_ids: agreement.agent_ids || [],
