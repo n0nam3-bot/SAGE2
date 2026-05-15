@@ -169,7 +169,6 @@ const SAGE = (() => {
       }
 
       UI.renderTradingResults(result);
-      UI.renderAgents?.();
       UI.showToast(`Trading session complete — ${result.finalPicks?.length || 0} picks`, 'success');
 
     } catch (err) {
@@ -220,7 +219,12 @@ const SAGE = (() => {
           agentId: pick.decision_agent_id || pick.source_agent || 's_cio',
           decision_agent_id: pick.decision_agent_id || 's_cio',
           review_agent_id: pick.review_agent_id || (LLM.isHyperMode?.() ? 's_final_review' : ''),
-          credited_agents: pick.credited_agents || [pick.decision_agent_id || 's_cio', pick.review_agent_id || (LLM.isHyperMode?.() ? 's_final_review' : '')].filter(Boolean),
+          credited_agents: [...new Set([
+            ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
+            ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+            pick.decision_agent_id || 's_cio',
+            pick.review_agent_id || (LLM.isHyperMode?.() ? 's_final_review' : ''),
+          ].filter(Boolean))],
           source_weight: pick.source_weight || 1,
           sport: pick.sport, game: pick.game, betType: pick.bet_type,
           pick: pick.pick, odds: pick.odds, units: pick.units,
@@ -244,7 +248,6 @@ const SAGE = (() => {
       }
 
       UI.renderSportsResults(result);
-      UI.renderAgents?.();
       window._sageState = state;
       reconcileCompletedSportsOutcomes().catch(() => {});
     UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
@@ -333,16 +336,30 @@ Spawn a new specialist agent?`);
     const outcomeDate = new Date().toISOString();
     await DB.put(DB.STORES.picks, { ...pick, correct, returnPct, outcomeDate });
 
+    const allAgents = await AgentManager.getAllAgents();
+    const agentLookup = new Map();
+    for (const agent of allAgents) {
+      const idKey = String(agent.id || '').trim().toLowerCase();
+      const nameKey = String(agent.name || '').trim().toLowerCase();
+      if (idKey) agentLookup.set(idKey, agent.id);
+      if (nameKey) agentLookup.set(nameKey, agent.id);
+    }
+    const resolveAgentId = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return null;
+      const byLookup = agentLookup.get(raw.toLowerCase());
+      if (byLookup) return byLookup;
+      if (/^([st]_[a-z0-9_]+)$/i.test(raw)) return raw;
+      return null;
+    };
     const agreedAgentIds = [
       pick.agentId,
       pick.decision_agent_id,
       pick.review_agent_id,
       ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
       ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
-      ...(Array.isArray(pick.agents_in_agreement)
-        ? pick.agents_in_agreement.filter(v => /^([st]_[a-z0-9_]+)$/i.test(String(v).trim()))
-        : []),
-    ].map(v => String(v).trim()).filter(Boolean);
+      ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []),
+    ].map(resolveAgentId).filter(Boolean);
     const uniqueAgentIds = [...new Set(agreedAgentIds)];
 
     for (const agentId of uniqueAgentIds) {
