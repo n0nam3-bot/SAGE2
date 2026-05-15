@@ -15,21 +15,6 @@ const DebateEngine = (() => {
     return /\d/.test(s) && !/\blive\b|\bfinal\b|\bpostponed\b|\bdelayed\b/i.test(s);
   }
 
-  function normalizeText(value) {
-    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  }
-
-  function normalizeSportKey(value) {
-    const s = String(value || '').toUpperCase();
-    if (!s) return '';
-    if (s.includes('NFL')) return 'NFL';
-    if (s.includes('NBA')) return 'NBA';
-    if (s.includes('MLB')) return 'MLB';
-    if (s.includes('NHL')) return 'NHL';
-    if (s.includes('MMA') || s.includes('UFC') || s.includes('MIXED MARTIAL ARTS')) return 'MMA';
-    return s.replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] || s;
-  }
-
   function isIrrelevantBetLabel(value) {
     const s = String(value || '').trim().toLowerCase();
     if (!s) return true;
@@ -55,11 +40,25 @@ const DebateEngine = (() => {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const chatFn = LLM.isConsensusMode() ? LLM.chatMultiProvider : LLM.chat;
-        const result = await chatFn({
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }],
-          maxTokens: 1800,
-        });
+        let result;
+        try {
+          result = await chatFn({
+            system: systemPrompt,
+            messages: [{ role: 'user', content: userMessage }],
+            maxTokens: 1800,
+          });
+        } catch (chatErr) {
+          const msg = String(chatErr?.message || chatErr || '');
+          if (LLM.isConsensusMode() && /all providers failed in consensus mode/i.test(msg)) {
+            result = await LLM.chat({
+              system: systemPrompt,
+              messages: [{ role: 'user', content: userMessage }],
+              maxTokens: 1800,
+            });
+          } else {
+            throw chatErr;
+          }
+        }
 
         const rawText = result.text || '';
         let parsed = null;
@@ -288,6 +287,29 @@ Provide your picks in the specified JSON format.`;
       results.posture = cioResult.parsed.portfolio_posture;
       results.summary = cioResult.parsed.session_summary;
     }
+
+    if (LLM.isHyperMode?.()) {
+      const reviewAgents = tradingAgents.filter(a => a.layer === 5);
+      if (reviewAgents.length) {
+        onProgress?.({ stage: 'layer5', message: 'Running final risk review (hyper mode)...' });
+        const reviewCtx = {
+          marketContext: ctx.marketContext,
+          priorLayerOutput: {
+            ...decisionCtx.priorLayerOutput,
+            cioOutput: cioResult?.parsed || {},
+            finalPicks: results.finalPicks,
+          },
+        };
+        const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'trading');
+        results.layers.finalReview = reviewResults;
+        const reviewParsed = reviewResults.find(r => r.agentId === 't_review')?.parsed || reviewResults[0]?.parsed || {};
+        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed);
+        if (reviewParsed?.portfolio_posture) results.posture = reviewParsed.portfolio_posture;
+        if (reviewParsed?.regime_call) results.regime = reviewParsed.regime_call;
+        if (reviewParsed?.session_summary) results.summary = reviewParsed.session_summary;
+        onProgress?.({ stage: 'layer5_done', message: 'Final risk review complete', data: reviewResults });
+      }
+    }
     results.endTime = new Date().toISOString();
     results.finalPicks = results.finalPicks || [];
     onProgress?.({ stage: 'complete', message: `Session complete — ${results.finalPicks?.length || 0} final picks`, data: results });
@@ -368,7 +390,29 @@ Provide your picks in the specified JSON format.`;
     let finalPicks = consolidateSportsFinalPicks(scheduleFiltered);
 
     if (LLM.isHyperMode?.()) {
-      finalPicks = consolidateSportsFinalPicks(await runHyperReview('sports', finalPicks, ctx, consensusBrief));
+      const reviewAgents = sportsAgents.filter(a => a.layer === 4);
+      if (reviewAgents.length) {
+        onProgress?.({ stage: 'layer4', message: 'Running final risk review (hyper mode)...' });
+        const reviewCtx = {
+          gamesContext: ctx.gamesContext,
+          injuryNews: ctx.injuryNews,
+          lineMovements: ctx.lineMovements,
+          scheduleData,
+          priorLayerOutput: {
+            specialistPicks: rawPicks,
+            supportAnalysis: extractSupportData(supportResults),
+            consensusBrief,
+            candidatePicks: finalPicks,
+            agentWeights,
+            hyperMode: true,
+          },
+        };
+        const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'sports');
+        results.layers.finalReview = reviewResults;
+        const reviewParsed = reviewResults.find(r => r.agentId === 's_final_review')?.parsed || reviewResults[0]?.parsed || {};
+        finalPicks = applySportsFinalReview(finalPicks, reviewParsed);
+        onProgress?.({ stage: 'layer4_done', message: 'Final risk review complete', data: reviewResults });
+      }
     }
 
     results.finalPicks = finalPicks.slice(0, 5);
@@ -378,8 +422,10 @@ Provide your picks in the specified JSON format.`;
         enrichFinalSportsPicks(normalizeSportsFinalPicks(fallbackPicks), consensusBrief, scheduleData),
         scheduleData
       ));
-      results.finalPicks = (LLM.isHyperMode?.() ? consolidateSportsFinalPicks(await runHyperReview('sports', fallbackFinal, ctx, consensusBrief)) : fallbackFinal)
-        .slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
+      const reviewedFallback = LLM.isHyperMode?.() && results.layers.finalReview
+        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {})
+        : fallbackFinal;
+      results.finalPicks = reviewedFallback.slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
 
     results.summary = cioResult?.parsed?.session_edge_summary
@@ -415,6 +461,30 @@ Provide your picks in the specified JSON format.`;
       }
     }
     return results;
+  }
+
+  function applySportsFinalReview(picks, reviewParsed) {
+    const approved = reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.final_picks || reviewParsed?.finalPicks;
+    if (Array.isArray(approved) && approved.length) {
+      return consolidateSportsFinalPicks(normalizeSportsFinalPicks(approved));
+    }
+    const rejected = new Set((reviewParsed?.rejected_picks || reviewParsed?.rejected || []).map(p => dedupeSportsPickKey(normalizeSportsPick(p) || p)).filter(Boolean));
+    if (rejected.size) {
+      return consolidateSportsFinalPicks(normalizeSportsFinalPicks((Array.isArray(picks) ? picks : []).filter(p => !rejected.has(dedupeSportsPickKey(p)))));
+    }
+    return picks;
+  }
+
+  function applyTradingFinalReview(picks, reviewParsed) {
+    const approved = reviewParsed?.approved_ideas || reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.top_ideas;
+    if (Array.isArray(approved) && approved.length) {
+      return approved;
+    }
+    const rejected = new Set((reviewParsed?.rejected_ideas || reviewParsed?.rejected_picks || reviewParsed?.rejected || []).map(item => String(item?.ticker || item?.symbol || item?.name || '').toLowerCase()).filter(Boolean));
+    if (rejected.size) {
+      return (Array.isArray(picks) ? picks : []).filter(item => !rejected.has(String(item?.ticker || item?.symbol || item?.name || '').toLowerCase()));
+    }
+    return picks;
   }
 
   let _onRateLimitCb = null;
@@ -511,8 +581,6 @@ Provide your picks in the specified JSON format.`;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
     if (!hasSpecificGameTime(gameTime)) return null;
 
-    if (/live|in progress|final|postponed|delayed/i.test(`${pick} ${game} ${eventDate} ${gameTime}`)) return null;
-
     const confidence = normalizeConfidence(
       obj.confidence ?? obj.confidence_pct ?? obj.original_bet?.confidence ?? obj.score
     );
@@ -522,7 +590,7 @@ Provide your picks in the specified JSON format.`;
 
     return {
       ...obj,
-      sport: normalizeSportKey(sport || ''),
+      sport,
       game,
       event_date: eventDate,
       game_time: gameTime,
@@ -592,13 +660,12 @@ Provide your picks in the specified JSON format.`;
     const gameTime = raw.game_time ?? raw.time ?? raw.start_time ?? raw.original_bet?.game_time ?? '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(eventDate))) return null;
     if (!hasSpecificGameTime(gameTime)) return null;
-    if (/\blive\b|\bin progress\b|\bfinal\b|\bpostponed\b|\bdelayed\b/i.test(`${pick} ${game} ${eventDate} ${gameTime}`)) return null;
 
     if (isIrrelevantBetLabel(pick)) return null;
 
     const normalized = {
       ...raw,
-      sport: normalizeSportKey(raw.sport || raw.original_bet?.sport || ''),
+      sport: raw.sport || raw.original_bet?.sport || '',
       game,
       event_date: eventDate,
       game_time: gameTime,
@@ -640,10 +707,10 @@ Provide your picks in the specified JSON format.`;
     const family = normalizeMarketFamily(p.bet_type || p.market);
     const pick = normalizePickLabel(p.pick, family);
     return [
-      normalizeSportKey(p.sport || ''),
-      normalizeText(p.game || p.event || ''),
+      (p.sport || '').toLowerCase(),
+      (p.game || p.event || '').toLowerCase(),
       family,
-      normalizeText(pick),
+      pick,
     ].join('|');
   }
 
@@ -725,7 +792,7 @@ Provide your picks in the specified JSON format.`;
 
     const topAgreements = [...groups.values()]
       .map(g => ({
-        sport: normalizeSportKey(g.sport),
+        sport: g.sport,
         game: g.game,
         market: g.market,
         pick: g.pick,
@@ -746,7 +813,7 @@ Provide your picks in the specified JSON format.`;
       const agentIds = [...g.sourceAgents].filter(Boolean);
       const llmList = [...g.llms].filter(Boolean);
       pickAgreementMap[key] = {
-        sport: normalizeSportKey(g.sport),
+        sport: g.sport,
         game: g.game,
         market: g.market,
         pick: g.pick,
@@ -788,9 +855,9 @@ Provide your picks in the specified JSON format.`;
 
   function findMatchingScheduledGame(pick, scheduleData) {
     const gamesBySport = normalizeScheduleData(scheduleData);
-    const sport = normalizeSportKey(pick.sport || '');
+    const sport = String(pick.sport || '').toUpperCase();
     const candidates = gamesBySport[sport] || [];
-    const gameText = normalizeText(pick.game || '');
+    const gameText = String(pick.game || '').toLowerCase();
     const pickTeams = gameText.replace(/\(game\s*\d+\)/ig, '').replace(/\s+/g, ' ').trim();
     const now = Date.now();
 
@@ -801,8 +868,8 @@ Provide your picks in the specified JSON format.`;
       if (!Number.isFinite(startMs) || startMs <= now) continue;
       if (gameStatus && gameStatus !== 'pre') continue;
       if (!validTime) continue;
-      const away = normalizeText(game.awayTeam || '');
-      const home = normalizeText(game.homeTeam || '');
+      const away = String(game.awayTeam || '').toLowerCase();
+      const home = String(game.homeTeam || '').toLowerCase();
       if (!away || !home) continue;
       const matchesAwayHome = pickTeams.includes(away) && pickTeams.includes(home);
       const matchesHomeAway = pickTeams.includes(home) && pickTeams.includes(away);
@@ -821,7 +888,6 @@ Provide your picks in the specified JSON format.`;
       const scheduled = findMatchingScheduledGame(normalized, scheduleData);
       const finalPick = {
         ...normalized,
-        sport: normalizeSportKey(normalized.sport || ''),
         game_time: scheduled?.time || normalized.game_time,
         agents_in_agreement: agreement.agents_in_agreement || normalized.agents_in_agreement || [],
         agreement_agent_ids: agreement.agent_ids || [],
