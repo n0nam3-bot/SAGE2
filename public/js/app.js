@@ -169,6 +169,7 @@ const SAGE = (() => {
       }
 
       UI.renderTradingResults(result);
+      UI.renderAgents?.();
       UI.showToast(`Trading session complete — ${result.finalPicks?.length || 0} picks`, 'success');
 
     } catch (err) {
@@ -243,6 +244,7 @@ const SAGE = (() => {
       }
 
       UI.renderSportsResults(result);
+      UI.renderAgents?.();
       window._sageState = state;
       reconcileCompletedSportsOutcomes().catch(() => {});
     UI.showToast(`Sports session complete — ${result.finalPicks?.length || 0} picks (≥ -200)`, 'success');
