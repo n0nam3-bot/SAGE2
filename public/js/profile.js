@@ -95,7 +95,6 @@ const Profile = (() => {
             <button class="btn-sm test-btn" onclick="Profile.testAppsScript()">Test</button>
           </div>
           <div id="apps-script-status" class="test-result" style="margin-top:4px"></div>
-          <div id="sheets-auth-status" class="test-result" style="margin-top:4px">${(globalThis.SheetsClient?.getAppsScriptUrl?.() || keys.apps_script_url || getPersistedField('apps_script_url')) ? '✅ Sheets ready' : '⚠️ Sheets not connected yet'}</div>
         </div>
       </div>
 
@@ -138,7 +137,6 @@ const Profile = (() => {
       document.getElementById('save-password').value = '';
       // Update status bar
       const prov = document.getElementById('status-provider'); if (prov) prov.value = LLM.getProviderMode();
-      SAGE.updateSheetsStatus?.().catch?.(() => {});
     } catch (err) {
       UI.showToast(err.message, 'error');
     }
@@ -152,7 +150,7 @@ const Profile = (() => {
     const apiKey = keyEl.value.trim();
     if (!apiKey) { resultEl.textContent = '⚠️ Enter a key first'; resultEl.className = 'test-result warn'; return; }
     resultEl.textContent = '⏳ Testing...'; resultEl.className = 'test-result';
-    const result = await LLM.testKey(provider, apiKey);
+    const result = await LLM.testKey(provider, apiKey, { ignoreCooldown: true });
     if (result.success) {
       resultEl.textContent = `✅ Working — model: ${result.model}`;
       resultEl.className = 'test-result ok';
@@ -220,8 +218,6 @@ const Profile = (() => {
         const el = document.getElementById('sheets-auth-status');
         if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
         UI.showToast('Google Sheets connected ✅', 'success');
-      SAGE.updateSheetsStatus?.().catch?.(() => {});
-        SAGE.updateSheetsStatus?.().catch?.(() => {});
         if (popup && !popup.closed) popup.close();
       }
       if (popup && popup.closed && !token) clearInterval(timer);
@@ -282,7 +278,8 @@ const Profile = (() => {
         localStorage.setItem('sage_apps_script_url', url);
         localStorage.setItem('sage_profile_' + user + '_apps_script_url', url);
         UI.showToast('Sheets connected ✅', 'success');
-        SAGE.updateSheetsStatus?.().catch?.(() => {});
+        // Refresh status bar
+        const st = { sheetsStatus: { authorized: true, appsScriptConfigured: true } };
         document.querySelectorAll('.status-item').forEach(el => {
           if (el.textContent.includes('Sheets')) {
             el.className = 'status-item ok';
@@ -323,9 +320,7 @@ const Profile = (() => {
       window.history.replaceState({}, document.title, window.location.pathname);
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
-      SAGE.updateSheetsStatus?.().catch?.(() => {});
       UI.showToast('Google Sheets connected ✅', 'success');
-      SAGE.updateSheetsStatus?.().catch?.(() => {});
     }
   }
 
@@ -516,11 +511,7 @@ const Profile = (() => {
     // Check sheets status
     const token = getSheetsToken();
     const el = document.getElementById('sheets-auth-status');
-    if (el) {
-      const url = globalThis.SheetsClient?.getAppsScriptUrl?.() || getPersistedField('apps_script_url');
-      if (token || url) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
-    }
-    SAGE.updateSheetsStatus?.().catch?.(() => {});
+    if (el && token) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
   }
 
   if (typeof window !== 'undefined' && !window.__sageSheetsMessageListenerAdded) {
@@ -535,7 +526,6 @@ const Profile = (() => {
       localStorage.setItem('sage_sheets_token_user', user);
       const el = document.getElementById('sheets-auth-status');
       if (el) { el.textContent = '✅ Connected'; el.style.color = 'var(--accent-green)'; }
-      SAGE.updateSheetsStatus?.().catch?.(() => {});
     });
   }
 

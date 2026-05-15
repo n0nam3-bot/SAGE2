@@ -374,6 +374,30 @@ const LLM = (() => {
     throw new Error('All providers failed. ' + errors.join(' | '));
   }
 
+  // ── Gemini key test (lightweight model discovery call) ──
+  async function testGeminiKey(apiKey) {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (res.status === 429) {
+      throw new Error('Gemini rate limited (429)');
+    }
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error?.message || `Gemini model list HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const models = Array.isArray(data.models) ? data.models : [];
+    const flashModel = models.find(m => String(m.name || '').includes('gemini-2.5-flash'))?.name
+      || models.find(m => String(m.name || '').includes('gemini-2.0-flash'))?.name
+      || models[0]?.name
+      || 'Gemini';
+    return { text: `Gemini ready (${models.length} models)`, provider: 'gemini', model: flashModel };
+  }
+
   // ── Gemini — native API (more reliable than OpenAI-compat endpoint) ──
   async function callGemini(apiKey, system, messages, maxTokens) {
     // Build Gemini-format contents array
@@ -501,22 +525,28 @@ const LLM = (() => {
   }
 
   // ── Test a specific provider key ──
-  async function testKey(provider, apiKey) {
+  async function testKey(provider, apiKey, options = {}) {
+    const { ignoreCooldown = true } = options || {};
     const testMsg = [{ role: 'user', content: 'Reply with exactly three words: SAGE is online' }];
     try {
-      const remaining = getProviderCooldownRemaining(provider);
-      if (remaining > 0) {
-        return { success: false, error: `${PROVIDER_INFO[provider]?.name || provider} is cooling down for ${Math.ceil(remaining / 1000)}s` };
+      if (!ignoreCooldown) {
+        const remaining = getProviderCooldownRemaining(provider);
+        if (remaining > 0) {
+          return { success: false, error: `${PROVIDER_INFO[provider]?.name || provider} is cooling down for ${Math.ceil(remaining / 1000)}s` };
+        }
       }
       let result;
-      if (provider === 'gemini')     result = await callGemini(apiKey, null, testMsg, 30);
+      if (provider === 'gemini')     result = await testGeminiKey(apiKey);
       else if (provider === 'groq')  result = await callGroq(apiKey, null, testMsg, 30);
       else                           result = await callOpenRouter(apiKey, null, testMsg, 30);
       return { success: true, response: result.text.trim().slice(0, 80), model: result.model };
     } catch (e) {
       // Make error messages more human-readable
       let msg = e.message;
-      if (isRateLimitError(e)) {
+      if (provider === 'gemini' && isRateLimitError(e)) {
+        // Do not persist a cooldown for manual key testing; Gemini quota can be transient.
+        msg = 'Google Gemini is rate limited right now. The key may still be valid — try again later or switch providers.';
+      } else if (isRateLimitError(e)) {
         setProviderCooldown(provider);
         const seconds = Math.ceil(getProviderCooldownRemaining(provider) / 1000);
         msg = `${PROVIDER_INFO[provider]?.name || provider} is temporarily unavailable; try again in about ${seconds}s`;
