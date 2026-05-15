@@ -199,7 +199,35 @@ body {
 }
 
 .context-textarea:focus { outline: none; border-color: var(--accent-blue); }
-.context-textarea::placeholder { color: var(--text-muted); }
+.sports-market-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.sports-market-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.sports-market-pill input {
+  margin: 0;
+  accent-color: var(--accent-purple);
+}
+
+.sports-market-pill:hover {
+  border-color: rgba(168, 85, 247, 0.55);
+  color: var(--text-primary);
+}
 
 .run-btn {
   width: 100%;
