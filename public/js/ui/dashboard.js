@@ -26,70 +26,62 @@ const UI = (() => {
     if (window._sageState) window._sageState.activeTab = tab;
   }
 
-  function collectCurrentSessionAgentStats() {
-    const stats = {};
-    const sessions = [window._sageState?.lastSportsSession, window._sageState?.lastTradingSession].filter(Boolean);
-    for (const session of sessions) {
-      for (const pick of Array.isArray(session.finalPicks) ? session.finalPicks : []) {
-        const ids = new Set([
-          pick.agentId,
-          pick.decision_agent_id,
-          pick.review_agent_id,
-          pick.primary_agent_source,
-          pick.source_agent,
-          ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
-          ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
-          ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []),
-        ].map(v => String(v || '').trim()).filter(Boolean));
-        for (const id of ids) {
-          if (!/^[st]_[a-z0-9_]+$/i.test(id)) continue;
-          if (!stats[id]) stats[id] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
-          stats[id].predictions++;
-        }
-      }
-    }
-    return stats;
-  }
-
   // ════════════════════════════════════════
   // AGENT CARDS
   // ════════════════════════════════════════
+  function agentAliases(agent = {}) {
+    return new Set([
+      String(agent.id || '').trim().toLowerCase(),
+      String(agent.name || '').trim().toLowerCase(),
+      String(agent.layerName || '').trim().toLowerCase(),
+    ].filter(Boolean));
+  }
+
+  function pickReferencesAgent(pick = {}, agent = {}) {
+    const aliases = agentAliases(agent);
+    if (!aliases.size) return false;
+    const fields = [
+      pick.agentId,
+      pick.decision_agent_id,
+      pick.review_agent_id,
+      pick.source_agent,
+      pick.source_agent_name,
+      ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
+      ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+      ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []),
+    ].map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+    return fields.some(v => aliases.has(v));
+  }
+
   async function renderAgents() {
     const container = document.getElementById('agents-container') || document.getElementById('agents-grid');
     if (!container) return;
     const agents = await AgentManager.getAllAgents();
     if (!agents.length) { container.innerHTML = '<div class="empty-agents">No agents initialized yet. Run a session first.</div>'; return; }
 
-    // Compute live stats from DB picks (so they show up even before manual outcome marking)
+    // Compute live stats from DB picks so credited agents and agreement participants are counted too
     const allPicks = await DB.getAllPicks();
     const liveStats = {};
-    for (const pick of allPicks) {
-      const aid = pick.agentId;
-      if (!aid) continue;
-      if (!liveStats[aid]) liveStats[aid] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
-      liveStats[aid].predictions++;
-      if (pick.outcomeDate) {
-        if (pick.correct) { liveStats[aid].correct++; liveStats[aid].wins++; }
-        else { liveStats[aid].losses++; }
-        liveStats[aid].totalReturn += (pick.returnPct || 0);
-      }
+    for (const agent of agents) {
+      liveStats[agent.id] = liveStats[agent.id] || { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
     }
-
-    const sessionStats = collectCurrentSessionAgentStats();
-    for (const [aid, sess] of Object.entries(sessionStats)) {
-      if (!liveStats[aid]) liveStats[aid] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
-      liveStats[aid].predictions = Math.max(liveStats[aid].predictions || 0, sess.predictions || 0);
-      liveStats[aid].correct = Math.max(liveStats[aid].correct || 0, sess.correct || 0);
-      liveStats[aid].wins = Math.max(liveStats[aid].wins || 0, sess.wins || 0);
-      liveStats[aid].losses = Math.max(liveStats[aid].losses || 0, sess.losses || 0);
-      liveStats[aid].totalReturn = Math.max(liveStats[aid].totalReturn || 0, sess.totalReturn || 0);
+    for (const agent of agents) {
+      for (const pick of allPicks) {
+        if (!pickReferencesAgent(pick, agent)) continue;
+        const slot = liveStats[agent.id] || (liveStats[agent.id] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 });
+        slot.predictions++;
+        if (pick.outcomeDate) {
+          if (pick.correct) { slot.correct++; slot.wins++; }
+          else { slot.losses++; }
+          slot.totalReturn += (pick.returnPct || 0);
+        }
+      }
     }
 
     agents.forEach(a => {
       const live = liveStats[a.id];
       if (!live) return;
       const stored = a.stats || {};
-      // Use whichever is higher (live pick count vs stored)
       if (live.predictions > (stored.predictions || 0)) {
         a.stats = {
           predictions: live.predictions,
@@ -443,10 +435,15 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
     const confColor = conf >= 75 ? '#22c55e' : conf >= 60 ? '#f59e0b' : '#ef4444';
     const units = pick.units ?? pick.stake_units ?? 1;
     const sport = (pick.sport || '').toUpperCase();
-    const agents = pick.agents_in_agreement || [];
-    const llms = Array.isArray(pick.agreement_llms) ? pick.agreement_llms.filter(Boolean).map(l => `${l} LLM`) : [];
+    const agents = Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement.filter(Boolean) : [];
+    const llms = Array.isArray(pick.agreement_llms) ? pick.agreement_llms.filter(Boolean) : [];
     const creditedAgents = Array.isArray(pick.credited_agents) ? pick.credited_agents.filter(Boolean) : [];
-    const agreementLabel = [...new Set([...(pick.agreement_breakdown ? [pick.agreement_breakdown] : []), ...agents, ...llms, ...creditedAgents])];
+    const llmNames = [...new Set(llms)];
+    const agentNames = [...new Set([...agents, ...creditedAgents])];
+    const agreementParts = [];
+    if (llmNames.length) agreementParts.push(`LLMs: ${llmNames.slice(0, 3).join(', ')}${llmNames.length > 3 ? ` +${llmNames.length - 3}` : ''}`);
+    if (agentNames.length) agreementParts.push(`Agents: ${agentNames.slice(0, 3).join(', ')}${agentNames.length > 3 ? ` +${agentNames.length - 3}` : ''}`);
+    const agreementText = agreementParts.join(' | ');
 
     // Format date/time display
     const eventDate = pick.event_date || '';
@@ -496,7 +493,7 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
         <span class="conf-val" style="color:${confColor}">${conf}/100</span>
       </div>
       ${reasoning ? `<div class="pick-reasoning">${reasoningShort}</div>` : ''}
-      ${(pick.agreement_count || agreementLabel.length) > 1 ? `<div class="agents-agree agree-strong">🤝 ${(pick.agreement_breakdown || agreementLabel.slice(0,3).join(', '))}${agreementLabel.length > 3 ? ` +${agreementLabel.length-3}` : ''}</div>` : (agreementLabel.length > 0 ? `<div class="agents-agree">🤝 ${agreementLabel.slice(0,3).join(', ')}${agreementLabel.length > 3 ? ` +${agreementLabel.length-3}` : ''}</div>` : '')}
+      ${agreementText ? `<div class="agents-agree ${((pick.agreement_count || agreementParts.length) > 1) ? 'agree-strong' : ''}">🤝 ${agreementText}</div>` : ''}
       <div class="pick-actions">
         <button class="btn-sm win-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',true)">✅ Win</button>
         <button class="btn-sm loss-btn" onclick="UI.markSportsOutcome('${safeGame}','${safePick}',false)">❌ Loss</button>
