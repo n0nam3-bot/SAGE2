@@ -302,6 +302,106 @@ var SheetsClient = globalThis.SheetsClient = (() => {
     });
   }
 
+
+  function normalizeOutcomeLabel(v) {
+    const s = String(v || '').trim().toLowerCase();
+    if (!s) return '';
+    if (s.startsWith('win') || s.includes('✅')) return 'WIN ✅';
+    if (s.startsWith('loss') || s.includes('❌')) return 'LOSS ❌';
+    return String(v || '');
+  }
+
+  function calcRunningRoiFromRows(rows, outcomeIdx = 13, pnlIdx = 14, unitsIdx = 12) {
+    let unitsRisked = 0;
+    let pnl = 0;
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const outcome = String(row[outcomeIdx] || '').trim().toLowerCase();
+      if (!outcome) continue;
+      const units = Number(row[unitsIdx] || 0) || 0;
+      const rowPnl = Number(row[pnlIdx] || 0) || 0;
+      unitsRisked += Math.abs(units);
+      pnl += rowPnl;
+    }
+    return unitsRisked > 0 ? ((pnl / unitsRisked) * 100).toFixed(1) : '0.0';
+  }
+
+  async function markSportsOutcomeDirect(payload = {}) {
+    const token = getToken();
+    const sheetId = getSheetId();
+    if (!token || !sheetId) throw new Error('Missing Sheets token or sheet ID');
+
+    const range = encodeURIComponent(`'Sports Picks'!A:S`);
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Sheets read ${res.status}`);
+    const data = await res.json();
+    const rows = data.values || [];
+    if (rows.length < 2) return false;
+
+    const headers = rows[0];
+    const cols = {
+      session: headers.findIndex(h => /session/i.test(String(h))) + 1,
+      game: headers.findIndex(h => /^game$/i.test(String(h))) + 1,
+      eventDate: headers.findIndex(h => /event date/i.test(String(h))) + 1,
+      betType: headers.findIndex(h => /bet type/i.test(String(h))) + 1,
+      pick: headers.findIndex(h => /^pick$/i.test(String(h))) + 1,
+      outcome: headers.findIndex(h => /^outcome$/i.test(String(h))) + 1,
+      pnl: headers.findIndex(h => /p&l/i.test(String(h))) + 1,
+      roi: headers.findIndex(h => /running roi/i.test(String(h))) + 1,
+      weight: headers.findIndex(h => /agent weight/i.test(String(h))) + 1,
+    };
+
+    const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const matchIndex = rows.findIndex((row, i) => i > 0 &&
+      (!payload.sessionId || String(row[cols.session - 1] || '') === String(payload.sessionId)) &&
+      (!payload.game || norm(row[cols.game - 1]) === norm(payload.game)) &&
+      (!payload.pick || norm(row[cols.pick - 1]) === norm(payload.pick)) &&
+      (!payload.betType || norm(row[cols.betType - 1]) === norm(payload.betType)) &&
+      (!payload.eventDate || norm(row[cols.eventDate - 1]) === norm(payload.eventDate))
+    );
+    if (matchIndex < 1) return false;
+
+    const row = [...rows[matchIndex]];
+    if (cols.outcome > 0) row[cols.outcome - 1] = normalizeOutcomeLabel(payload.outcome);
+    if (cols.pnl > 0 && payload.pnl !== undefined) row[cols.pnl - 1] = payload.pnl;
+    if (cols.weight > 0 && payload.agentWeight !== undefined) row[cols.weight - 1] = payload.agentWeight;
+    if (cols.roi > 0) {
+      const cloned = rows.map((r, i) => (i === matchIndex ? row : r));
+      row[cols.roi - 1] = calcRunningRoiFromRows(cloned.slice(1), 13, 14, 12);
+    }
+
+    const rowRange = encodeURIComponent(`'Sports Picks'!A${matchIndex + 1}`);
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${rowRange}?valueInputOption=USER_ENTERED`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: [row] }),
+    });
+    return true;
+  }
+
+  async function markSportsOutcome(payload = {}) {
+    try {
+      if (isLocal()) {
+        const res = await fetch('/api/sheets/mark-outcome', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tab: 'Sports Picks', payload }),
+        });
+        return !!res.ok;
+      }
+      const scriptUrl = getAppsScriptUrl();
+      if (scriptUrl) {
+        await appendViaAppsScript(scriptUrl, 'Sports Picks', [], { action: 'mark_outcome', ...payload, username: currentUsername() });
+        return true;
+      }
+      return await markSportsOutcomeDirect(payload);
+    } catch (err) {
+      console.warn('[Sheets] mark sports outcome failed:', err.message);
+      return false;
+    }
+  }
+
   // ════════════════════════════════════════
   // PUBLIC LOGGING FUNCTIONS
   // ════════════════════════════════════════
@@ -350,7 +450,7 @@ var SheetsClient = globalThis.SheetsClient = (() => {
         odds, implied,
         pick.confidence || '',
         pick.units ?? pick.stake_units ?? 1,
-        '', '', '', '',   // outcome, P&L, ROI, weight (filled later)
+        '', '', '', pick.source_weight || pick.sourceWeight || 1,   // outcome, P&L, ROI, weight (filled later)
         pick.full_reasoning || pick.reasoning || '',
         agreementCell,
       ];
@@ -431,6 +531,7 @@ var SheetsClient = globalThis.SheetsClient = (() => {
 
   const api = {
     checkStatus, authorize,
+    markSportsOutcome,
     logTradingSession, logSportsSession,
     logFreshOddsSnapshot, syncAgentPerformance, logEquityPoint,
     overwriteRows,
