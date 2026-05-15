@@ -303,7 +303,7 @@ Provide your picks in the specified JSON format.`;
         const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'trading');
         results.layers.finalReview = reviewResults;
         const reviewParsed = reviewResults.find(r => r.agentId === 't_review')?.parsed || reviewResults[0]?.parsed || {};
-        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed, { allIdeas });
+        results.finalPicks = applyTradingFinalReview(results.finalPicks, reviewParsed);
         if (reviewParsed?.portfolio_posture) results.posture = reviewParsed.portfolio_posture;
         if (reviewParsed?.regime_call) results.regime = reviewParsed.regime_call;
         if (reviewParsed?.session_summary) results.summary = reviewParsed.session_summary;
@@ -388,6 +388,12 @@ Provide your picks in the specified JSON format.`;
     const enrichedPicks = enrichFinalSportsPicks(rankedPicks, consensusBrief, scheduleData);
     const scheduleFiltered = filterUpcomingSportsPicks(enrichedPicks, scheduleData);
     let finalPicks = consolidateSportsFinalPicks(scheduleFiltered);
+    finalPicks = finalPicks.map(p => ({
+      ...p,
+      decision_agent_id: p.decision_agent_id || 's_cio',
+      review_agent_id: LLM.isHyperMode?.() ? (p.review_agent_id || 's_final_review') : (p.review_agent_id || ''),
+      credited_agents: [...new Set([p.decision_agent_id || 's_cio', ...(LLM.isHyperMode?.() ? ['s_final_review'] : []), ...(Array.isArray(p.credited_agents) ? p.credited_agents : [])])],
+    }));
 
     if (LLM.isHyperMode?.()) {
       const reviewAgents = sportsAgents.filter(a => a.layer === 4);
@@ -410,12 +416,12 @@ Provide your picks in the specified JSON format.`;
         const reviewResults = await runLayerSequential(reviewAgents, reviewCtx, 'sports');
         results.layers.finalReview = reviewResults;
         const reviewParsed = reviewResults.find(r => r.agentId === 's_final_review')?.parsed || reviewResults[0]?.parsed || {};
-        finalPicks = applySportsFinalReview(finalPicks, reviewParsed, {
-          scheduleData,
-          lineMovements: ctx.lineMovements,
-          supportAnalysis: extractSupportData(supportResults),
-          consensusBrief,
-        });
+        finalPicks = applySportsFinalReview(finalPicks, reviewParsed, consensusBrief).map(p => ({
+          ...p,
+          decision_agent_id: p.decision_agent_id || 's_cio',
+          review_agent_id: p.review_agent_id || 's_final_review',
+          credited_agents: [...new Set([p.decision_agent_id || 's_cio', p.review_agent_id || 's_final_review', ...(Array.isArray(p.credited_agents) ? p.credited_agents : [])])],
+        }));
         onProgress?.({ stage: 'layer4_done', message: 'Final risk review complete', data: reviewResults });
       }
     }
@@ -428,12 +434,12 @@ Provide your picks in the specified JSON format.`;
         scheduleData
       ));
       const reviewedFallback = LLM.isHyperMode?.() && results.layers.finalReview
-        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {}, {
-          scheduleData,
-          lineMovements: ctx.lineMovements,
-          supportAnalysis: extractSupportData(supportResults),
-          consensusBrief,
-        })
+        ? applySportsFinalReview(fallbackFinal, results.layers.finalReview.find(r => r.agentId === 's_final_review')?.parsed || results.layers.finalReview[0]?.parsed || {}, consensusBrief).map(p => ({
+          ...p,
+          decision_agent_id: p.decision_agent_id || 's_cio',
+          review_agent_id: p.review_agent_id || 's_final_review',
+          credited_agents: [...new Set([p.decision_agent_id || 's_cio', p.review_agent_id || 's_final_review', ...(Array.isArray(p.credited_agents) ? p.credited_agents : [])])],
+        }))
         : fallbackFinal;
       results.finalPicks = reviewedFallback.slice(0, Math.min(5, Math.max(3, fallbackPicks.length)));
     }
@@ -473,158 +479,24 @@ Provide your picks in the specified JSON format.`;
     return results;
   }
 
-
-  function normalizeTradingFinalPick(raw) {
-    const pick = raw || {};
-    const num = v => Number(String(v ?? '').replace(/[^\d.+-]/g, ''));
-    return {
-      ...pick,
-      ticker: String(pick.ticker || pick.symbol || pick.name || '').trim(),
-      action: String(pick.action || pick.side || '').trim(),
-      entry: Number.isFinite(num(pick.entry)) ? num(pick.entry) : pick.entry,
-      target: Number.isFinite(num(pick.target)) ? num(pick.target) : pick.target,
-      stop: Number.isFinite(num(pick.stop)) ? num(pick.stop) : pick.stop,
-      size_pct: Number(pick.size_pct ?? pick.units ?? pick.position_size ?? 0) || 0,
-      confidence: Number(pick.confidence || 0) || 0,
-      source_agent_source: pick.primary_agent_source || pick.source_agent || pick.sourceAgent || '',
-    };
-  }
-
-  function scoreTradingHyperPick(rawPick, reviewCtx = {}) {
-    const pick = normalizeTradingFinalPick(rawPick);
-    const notes = [];
-    let score = 10;
-
-    if (!pick.ticker) { score -= 4; notes.push('missing ticker'); }
-    if (!pick.action) { score -= 3; notes.push('missing action'); }
-    if (!Number.isFinite(Number(pick.entry))) { score -= 1.5; notes.push('missing entry'); }
-    if (!Number.isFinite(Number(pick.target))) { score -= 1.5; notes.push('missing target'); }
-    if (!Number.isFinite(Number(pick.stop))) { score -= 1.5; notes.push('missing stop'); }
-
-    const entry = Number(pick.entry), target = Number(pick.target), stop = Number(pick.stop);
-    if (Number.isFinite(entry) && Number.isFinite(target) && Number.isFinite(stop) && entry !== stop) {
-      const reward = Math.abs(target - entry);
-      const risk = Math.abs(entry - stop) || 1;
-      const rr = reward / risk;
-      if (rr < 1) { score -= 2.5; notes.push('poor reward/risk'); }
-      else if (rr < 1.5) { score -= 1.25; notes.push('thin reward/risk'); }
-    }
-
-    const size = Number(pick.size_pct || 0);
-    if (size > 3) { score -= 2; notes.push('oversized'); }
-    else if (size > 2) score -= 0.5;
-
-    if ((pick.confidence || 0) < 55) { score -= 2; notes.push('low confidence'); }
-    else if ((pick.confidence || 0) < 65) score -= 1;
-    else if ((pick.confidence || 0) >= 80) score += 0.5;
-
-    const text = `${pick.ticker} ${pick.action} ${pick.one_line_thesis || ''} ${pick.full_reasoning || ''}`.toLowerCase();
-    if (/earnings|fomc|cpi|fed|merger|buyout|approval|lawsuit|binary|event risk|headline/i.test(text)) {
-      score -= 1.25;
-      notes.push('tail-risk/event risk');
-    }
-    if (/crowded|overcrowded|too crowded|everyone|obvious|consensus trade/i.test(text)) {
-      score -= 1;
-      notes.push('crowding risk');
-    }
-
-    const candidates = Array.isArray(reviewCtx.allIdeas) ? reviewCtx.allIdeas : [];
-    const tickerKey = String(pick.ticker || '').toLowerCase();
-    const clusterCount = tickerKey ? candidates.filter(i => String(i.ticker || i.symbol || '').toLowerCase().includes(tickerKey)).length : 0;
-    if (clusterCount > 1) {
-      score -= Math.min(2, 0.5 * (clusterCount - 1));
-      notes.push('correlation cluster');
-    }
-
-    score = Math.max(0, Math.min(10, score));
-    const reject = score < 7;
-    const reviewed = {
-      ...rawPick,
-      ...pick,
-      hyper_score: Number(score.toFixed(1)),
-      hyper_notes: notes.join('; '),
-    };
-    if (!reject && score < 8) reviewed.size_pct = Math.min(Number(reviewed.size_pct || 0) || 0.5, 0.5);
-    return { reject, score, pick: reviewed };
-  }
-
-  function scoreSportsHyperPick(rawPick, reviewCtx = {}) {
-    const pick = normalizeSportsPick(rawPick);
-    if (!pick) return { reject: true, score: 0, pick: rawPick, reason: 'unparseable pick' };
-
-    const notes = [];
-    let score = 10;
-    const gameText = String(pick.game || '').toLowerCase();
-    const pickText = String(pick.pick || '').toLowerCase();
-    const betType = String(pick.bet_type || pick.market || '').toLowerCase();
-    const reasoning = `${pick.full_reasoning || pick.reasoning || ''} ${pick.pick || ''}`.toLowerCase();
-    const timeText = String(pick.game_time || '').toLowerCase();
-    const odds = Number(pick.odds || 0);
-    const conf = Number(pick.confidence || 0);
-
-    if (!pick.game || !pick.pick) { score -= 4; notes.push('missing game or pick'); }
-    if (/\bnone\b|\bno bet\b|\bpass\b|irrelevant|\breject\b/i.test(`${pickText} ${reasoning}`)) { score -= 8; notes.push('irrelevant / no-bet output'); }
-    if (/tbd|tba|unknown|postponed|delayed|live|in progress|final/i.test(timeText) || /tbd|tba|unknown|postponed|delayed|live|in progress|final/i.test(gameText)) {
-      return { reject: true, score: 0, pick, reason: 'live/TBD game' };
-    }
-
-    if (odds <= -220) { score -= 2; notes.push('heavy juice'); }
-    else if (odds <= -180) { score -= 0.75; notes.push('moderate juice'); }
-    else if (odds >= 160) { score -= 0.25; notes.push('high plus-price variance'); }
-
-    if (conf < 55) { score -= 2; notes.push('low confidence'); }
-    else if (conf < 65) { score -= 1; }
-    else if (conf >= 75) { score += 0.5; }
-
-    if (/revenge|must-win|desperate|trap game|statement|bounce back|due|narrative|lock/i.test(reasoning)) {
-      score -= 2;
-      notes.push('narrative trap risk');
-    }
-
-    if (/last 3|last 4|last 5|small sample|tiny sample|hot streak|cold streak/i.test(reasoning)) {
-      score -= 1;
-      notes.push('sample size concern');
-    }
-
-    const lineNotes = String(reviewCtx.lineMovements || '').toLowerCase();
-    const supportNotes = JSON.stringify(reviewCtx.supportAnalysis || reviewCtx.consensusBrief || {}).toLowerCase();
-    const teamKey = String(gameText || '').split('@').join(' ').split('vs').join(' ');
-    if (lineNotes && teamKey && !lineNotes.includes(teamKey.slice(0, 20).trim())) {
-      score -= 0.25;
-    }
-    if (/injur|scratch|out|questionable/.test(reasoning) && !/injur|scratch|out|questionable/.test(supportNotes)) {
-      score -= 1.5;
-      notes.push('injury not confirmed');
-    }
-    if (Array.isArray(pick.agreement_agent_ids) && pick.agreement_agent_ids.length >= 2) {
-      score += 0.5;
-    }
-    if (Array.isArray(pick.agreement_llms) && pick.agreement_llms.length >= 2) {
-      score += 0.25;
-    }
-
-    score = Math.max(0, Math.min(10, score));
-    const reject = score < 7;
-    const reviewed = {
-      ...pick,
-      hyper_score: Number(score.toFixed(1)),
-      hyper_notes: notes.join('; '),
-    };
-    if (!reject && score < 8) reviewed.units = Math.min(Number(reviewed.units || reviewed.stake_units || 1) || 1, 0.5);
-    if (!reject && !reviewed.units) reviewed.units = 0.5;
-    return { reject, score, pick: reviewed };
-  }
-
-  function applySportsFinalReview(picks, reviewParsed, reviewCtx = {}) {
+  function applySportsFinalReview(picks, reviewParsed, consensusBrief = null) {
+    const basePicks = normalizeSportsFinalPicks(picks);
+    const agreementMap = consensusBrief?.pickAgreementMap || {};
+    const mergeWithBase = (approvedList) => consolidateSportsFinalPicks(normalizeSportsFinalPicks(approvedList).map(p => {
+      const key = dedupeSportsPickKey(p);
+      const source = basePicks.find(bp => dedupeSportsPickKey(bp) === key) || {};
+      const consensusMeta = agreementMap[key] || {};
+      return mergeSportsPickAgreementMeta(source, mergeSportsPickAgreementMeta(consensusMeta, p));
+    }));
     const approved = reviewParsed?.approved_picks || reviewParsed?.approved || reviewParsed?.final_picks || reviewParsed?.finalPicks;
     if (Array.isArray(approved) && approved.length) {
-      return consolidateSportsFinalPicks(normalizeSportsFinalPicks(approved));
+      return mergeWithBase(approved);
     }
     const rejected = new Set((reviewParsed?.rejected_picks || reviewParsed?.rejected || []).map(p => dedupeSportsPickKey(normalizeSportsPick(p) || p)).filter(Boolean));
     if (rejected.size) {
-      return consolidateSportsFinalPicks(normalizeSportsFinalPicks((Array.isArray(picks) ? picks : []).filter(p => !rejected.has(dedupeSportsPickKey(p)))));
+      return consolidateSportsFinalPicks(basePicks.filter(p => !rejected.has(dedupeSportsPickKey(p))));
     }
-    return picks;
+    return consolidateSportsFinalPicks(basePicks);
   }
 
   function applyTradingFinalReview(picks, reviewParsed) {
@@ -829,12 +701,21 @@ Provide your picks in the specified JSON format.`;
       agents_in_agreement: raw.agents_in_agreement ?? raw.corroborating_agents ?? [],
       source_agent: raw.source_agent || raw.sourceAgent || raw.agentId || raw.primary_agent_source || 's_cio',
       source_agent_name: raw.source_agent_name || raw.agentName || raw.primary_agent_name || '',
-      source_providers: Array.isArray(raw.source_providers) ? raw.source_providers : [],
+      source_providers: Array.isArray(raw.source_providers) ? raw.source_providers : Array.isArray(raw.providerOutputs) ? raw.providerOutputs.map(p => p.provider).filter(Boolean) : [],
       source_weight: raw.source_weight ?? raw.sourceWeight ?? 1,
+      decision_agent_id: raw.decision_agent_id || raw.source_agent || 's_cio',
+      review_agent_id: raw.review_agent_id || '',
+      credited_agents: Array.isArray(raw.credited_agents) ? raw.credited_agents : [],
     };
     if (normalized.stake_units == null && normalized.units != null) normalized.stake_units = normalized.units;
     if (normalized.stake_units == null && raw.original_bet?.stake_units != null) normalized.stake_units = raw.original_bet.stake_units;
     normalized.units = normalized.stake_units;
+    if ((Number(normalized.confidence) || 0) <= 50) {
+      const agreementBoost = Math.max(0, (Array.isArray(normalized.agreement_llms) ? normalized.agreement_llms.length : 0) * 5)
+        + Math.max(0, (Array.isArray(normalized.agents_in_agreement) ? normalized.agents_in_agreement.length : 0) * 4)
+        + (normalized.decision_agent_id ? 8 : 0);
+      normalized.confidence = Math.min(95, Math.max(52, 50 + agreementBoost));
+    }
     return normalized;
   }
 
@@ -878,6 +759,31 @@ Provide your picks in the specified JSON format.`;
       out.push(pick);
     }
     return out;
+  }
+
+  function mergeSportsPickAgreementMeta(base = {}, extra = {}) {
+    const toSet = (...vals) => [...new Set(vals.flat().filter(Boolean))];
+    const merged = { ...base, ...extra };
+    const agents = toSet(base.agents_in_agreement || [], extra.agents_in_agreement || []);
+    const agentIds = toSet(base.agreement_agent_ids || [], extra.agreement_agent_ids || []);
+    const llms = toSet(base.agreement_llms || [], extra.agreement_llms || []);
+    const credited = toSet(base.credited_agents || [], extra.credited_agents || []);
+    const confidence = Number.isFinite(Number(extra.confidence)) && Number(extra.confidence) > Number(base.confidence)
+      ? Number(extra.confidence)
+      : Number(base.confidence);
+    return {
+      ...merged,
+      confidence: Number.isFinite(confidence) ? confidence : merged.confidence,
+      agents_in_agreement: agents.length ? agents : (Array.isArray(merged.agents_in_agreement) ? merged.agents_in_agreement : []),
+      agreement_agent_ids: agentIds,
+      agreement_llms: llms,
+      credited_agents: credited,
+      agreement_count: Math.max(Number(base.agreement_count || 0), Number(extra.agreement_count || 0), agents.length, agentIds.length, llms.length),
+      agreement_breakdown: extra.agreement_breakdown || base.agreement_breakdown || '',
+      source_agent: extra.source_agent || base.source_agent || '',
+      source_agent_name: extra.source_agent_name || base.source_agent_name || '',
+      source_providers: toSet(base.source_providers || [], extra.source_providers || []),
+    };
   }
 
   function extractSupportData(supportResults) {
@@ -1038,15 +944,14 @@ Provide your picks in the specified JSON format.`;
       const key = dedupeSportsPickKey(normalized);
       const agreement = consensusBrief?.pickAgreementMap?.[key] || {};
       const scheduled = findMatchingScheduledGame(normalized, scheduleData);
-      const finalPick = {
-        ...normalized,
+      const finalPick = mergeSportsPickAgreementMeta(normalized, {
         game_time: scheduled?.time || normalized.game_time,
         agents_in_agreement: agreement.agents_in_agreement || normalized.agents_in_agreement || [],
         agreement_agent_ids: agreement.agent_ids || [],
         agreement_llms: agreement.llms || [],
         agreement_breakdown: agreement.agreement_breakdown || '',
         agreement_count: agreement.agreementCount || 0,
-      };
+      });
       out.push(finalPick);
     }
     return out;
@@ -1078,13 +983,17 @@ Provide your picks in the specified JSON format.`;
       const agents = [...g._sources].filter(Boolean);
       const agentIds = [...g._agentIds].filter(Boolean);
       const llms = [...g._llms].filter(Boolean);
+      const agreementCount = Math.max(g._agreementCount || 0, agents.length, agentIds.length, llms.length);
       const breakdown = llms.length || agents.length ? `${llms.length ? llms.map(l => `${l} LLM`).join(' | ') : ''}${llms.length && agents.length ? ' | ' : ''}${agents.length ? agents.join(', ') : ''}` : '';
+      const conf = Number(g.confidence) || 0;
+      const boostedConfidence = conf > 50 ? conf : Math.min(95, Math.max(55, 52 + (agreementCount * 6)));
       return {
         ...g,
+        confidence: boostedConfidence,
         agents_in_agreement: agents,
         agreement_agent_ids: agentIds,
         agreement_llms: llms,
-        agreement_count: Math.max(g._agreementCount || 0, agents.length, agentIds.length, llms.length),
+        agreement_count: agreementCount,
         agreement_breakdown: breakdown,
         source_agent_name: g.source_agent_name || (agents[0] || ''),
       };
@@ -1095,11 +1004,11 @@ Provide your picks in the specified JSON format.`;
     if (!LLM.isHyperMode?.()) return picks;
     const role = domain === 'trading' ? 'Senior Hedge Fund Risk Manager' : 'Professional Sports Bettor';
     const prompt = domain === 'trading'
-      ? `You are the final ${role}. Review the approved trading ideas below and remove anything redundant, unsupported, too correlated, or weakly justified. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Preserve only the best ideas.
+      ? `You are the final ${role}. Review the approved trading ideas below and remove anything redundant, unsupported, too correlated, tail-risk heavy, illiquid, or weakly justified. Score every surviving idea 0-10 and reject anything below 7. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Preserve only the best ideas and trim size on marginal ideas.
 
 Context:
 ${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`
-      : `You are the final ${role}. Review the approved sports picks below and remove any live games, TBD times, duplicates, weak edges, or anything that failed the checks. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Keep one pick per unique game/market/side and preserve agreement metadata.
+      : `You are the final ${role}. Review the approved sports picks below and remove any live games, TBD times, duplicates, weak edges, low-sample heuristics, unconfirmed injuries, narrative traps, high juice, or anything that failed the checks. Score every surviving idea 0-10 and reject anything below 7; reduce borderline picks to 0.5u. Output STRICT JSON as {"approved_picks": [...], "rejected_picks": [...], "notes": ""}. Keep one pick per unique game/market/side and preserve agreement metadata.
 
 Context:
 ${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`;
@@ -1107,7 +1016,22 @@ ${JSON.stringify({ picks, consensusBrief, ctx }, null, 2)}`;
       const result = await LLM.chatMultiProvider({ system: '', messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
       const parsed = parseMaybeJson(result.text);
       const approved = parsed?.approved_picks || parsed?.approved || (Array.isArray(parsed) ? parsed : null);
-      if (Array.isArray(approved) && approved.length) return approved;
+      if (Array.isArray(approved) && approved.length) {
+        return approved.map(p => {
+          const normalized = normalizeSportsPick(p) || p;
+          const key = dedupeSportsPickKey(normalized);
+          const source = Array.isArray(picks) ? picks.find(bp => dedupeSportsPickKey(bp) === key) : null;
+          const consensusMeta = consensusBrief?.pickAgreementMap?.[key] || {};
+          const merged = mergeSportsPickAgreementMeta(source || {}, mergeSportsPickAgreementMeta(consensusMeta, normalized));
+          return {
+            ...merged,
+            decision_agent_id: merged.decision_agent_id || 's_cio',
+            review_agent_id: merged.review_agent_id || 's_final_review',
+            credited_agents: [...new Set([merged.decision_agent_id || 's_cio', merged.review_agent_id || 's_final_review', ...(Array.isArray(merged.credited_agents) ? merged.credited_agents : [])])],
+            confidence: (Number(merged.confidence) || 0) <= 50 ? Math.min(95, Math.max(55, 58 + (Number(merged.agreement_count) || 0) * 4)) : Number(merged.confidence) || 0,
+          };
+        });
+      }
     } catch (e) { /* keep original picks */ }
     return picks;
   }
