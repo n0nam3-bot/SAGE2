@@ -206,9 +206,9 @@ function doPost(e) {
     }
 
     if (action === 'mark_outcome') {
-      // payload: { action, tab, sessionId, identifier, outcome: "win"|"loss", pnl, runningRoi, agentWeight }
-      const { sessionId, identifier, outcome, pnl, runningRoi, agentWeight } = payload;
-      markOutcome(tab || TABS.SPORTS, sessionId, identifier, outcome, pnl, runningRoi, agentWeight);
+      // payload: { action, tab, sessionId, identifier, outcome: "win"|"loss", pnl }
+      const { sessionId, identifier, outcome, pnl } = payload;
+      markOutcome(tab || TABS.SPORTS, sessionId, identifier, outcome, pnl);
       writeLog('mark_outcome', tab, 1, user, 'ok');
       return jsonResponse({ success: true, action: 'mark_outcome' });
     }
@@ -326,7 +326,7 @@ function upsertAgentRow(row) {
   }
 }
 
-function markOutcome(tabName, sessionId, identifier, outcome, pnl, runningRoi, agentWeight) {
+function markOutcome(tabName, sessionId, identifier, outcome, pnl) {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(tabName);
   if (!sheet || sheet.getLastRow() < 2) return;
@@ -335,62 +335,31 @@ function markOutcome(tabName, sessionId, identifier, outcome, pnl, runningRoi, a
   const headers = sheet.getRange(1, 1, 1, numCols).getValues()[0];
   const outcomeCol = headers.findIndex(h => String(h).toLowerCase() === 'outcome') + 1;
   const pnlCol     = headers.findIndex(h => String(h).toLowerCase().includes('p&l')) + 1;
-  const roiCol     = headers.findIndex(h => String(h).toLowerCase().includes('running roi')) + 1;
-  const weightCol  = headers.findIndex(h => String(h).toLowerCase().includes('agent weight')) + 1;
   const sessionCol = headers.findIndex(h => String(h).toLowerCase().includes('session')) + 1;
-  const gameCol    = headers.findIndex(h => String(h).toLowerCase() === 'game') + 1;
   const pickCol    = headers.findIndex(h => String(h).toLowerCase() === 'pick') + 1;
 
   if (!outcomeCol) return;
 
   const data    = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
-  const target = String(identifier || '').toLowerCase();
-  let updatedRow = -1;
-
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
     const matchSession = !sessionId || String(row[sessionCol - 1]) === String(sessionId);
-    const rowGame = String(row[gameCol - 1] || '').toLowerCase();
-    const rowPick = String(row[pickCol - 1] || '').toLowerCase();
-    const rowKey = `${rowGame}||${rowPick}`;
-    const matchIdentifier = !target || rowKey.includes(target) || target.includes(rowKey) || String(rowPick).includes(target);
+    const matchPick    = !identifier || String(row[pickCol - 1]).toLowerCase().includes(identifier.toLowerCase());
     const alreadyMarked = row[outcomeCol - 1] !== '';
 
-    if (matchSession && matchIdentifier && !alreadyMarked) {
-      updatedRow = i + 2;
-      sheet.getRange(updatedRow, outcomeCol).setValue(outcome === 'win' ? 'WIN ✅' : 'LOSS ❌');
-      if (pnlCol && pnl !== undefined) sheet.getRange(updatedRow, pnlCol).setValue(pnl);
-      if (roiCol && runningRoi !== undefined) sheet.getRange(updatedRow, roiCol).setValue(runningRoi);
-      if (weightCol && agentWeight !== undefined) sheet.getRange(updatedRow, weightCol).setValue(agentWeight);
-      const rowRange = sheet.getRange(updatedRow, 1, 1, numCols);
+    if (matchSession && matchPick && !alreadyMarked) {
+      const sheetRow = i + 2;
+      sheet.getRange(sheetRow, outcomeCol).setValue(outcome === 'win' ? 'WIN ✅' : 'LOSS ❌');
+      if (pnlCol && pnl !== undefined) {
+        sheet.getRange(sheetRow, pnlCol).setValue(pnl);
+      }
+      // Color the row
+      const rowRange = sheet.getRange(sheetRow, 1, 1, numCols);
       rowRange.setBackground(outcome === 'win' ? COLORS.win : COLORS.loss);
-      break;
+      break; // mark first unresolved match only
     }
   }
-
-  if (updatedRow > 0 && pnlCol && roiCol) {
-    recalcRunningRoi(sheet, outcomeCol, pnlCol, roiCol, weightCol, numCols);
-  }
   SpreadsheetApp.flush();
-}
-
-function recalcRunningRoi(sheet, outcomeCol, pnlCol, roiCol, weightCol, numCols) {
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
-  const data = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
-  let totalPnl = 0;
-  let totalStake = 0;
-  for (let i = 0; i < data.length; i++) {
-    const row = data[i];
-    const outcome = String(row[outcomeCol - 1] || '').trim();
-    if (!outcome) continue;
-    const pnl = Number(row[pnlCol - 1] || 0);
-    const units = Number(row[12] || row[13] || 1) || 1; // Units column on Sports Picks is 13th (index 12)
-    totalPnl += pnl;
-    totalStake += Math.max(0, units);
-    const runningRoi = totalStake > 0 ? Math.round((totalPnl / totalStake) * 1000) / 10 : 0;
-    if (roiCol) sheet.getRange(i + 2, roiCol).setValue(runningRoi);
-  }
 }
 
 function writeLog(action, tab, rows, user, status) {
