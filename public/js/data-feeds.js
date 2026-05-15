@@ -317,7 +317,32 @@ const DataFeeds = (() => {
     const dateLabel = buildSportsDateLabel(pickedDate, dateMode);
     const range = buildDateRange(pickedDate, dateMode);
     const tz = userTimeZone();
+    const prefs = options.sportsPreferences || {};
     const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nUser timezone: ${tz}\nSelected date: ${dateLabel}\n`];
+    if (prefs && Object.keys(prefs).length) {
+      const marketLabelMap = {
+        moneyline: 'Moneyline',
+        spread: 'Spread / run line / puck line',
+        total: 'Totals',
+        player_prop: 'Player props',
+        game_prop: 'Game props',
+        team_prop: 'Team props',
+        special: 'Special / other props',
+      };
+      const selectedMarkets = Array.isArray(prefs.allowedMarkets) && prefs.allowedMarkets.length
+        ? prefs.allowedMarkets.map(m => marketLabelMap[m] || m).join(', ')
+        : 'All available';
+      const profileLabel = {
+        balanced: 'Balanced',
+        conservative: 'Conservative',
+        positive_only: 'Positive odds only',
+        lotto: 'Lotto / high-upside',
+      }[prefs.oddsProfile] || 'Balanced';
+      lines.push(`=== USER-SELECTED PREFERENCES ===`);
+      lines.push(`Risk profile: ${profileLabel}`);
+      lines.push(`Target pick count: ${Math.max(1, Math.min(20, Number(prefs.pickCount) || 5))}`);
+      lines.push(`Allowed bet types: ${selectedMarkets}`);
+    }
     const fetched = [];
     const oddsKey = keys.odds_api_key;
 
