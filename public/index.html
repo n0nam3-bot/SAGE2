@@ -297,9 +297,9 @@ Leave blank — SAGE fetches schedules, odds, and injury news itself." style="mi
           <h2 style="font-size:18px;font-weight:700">Agent Roster</h2>
           <p style="font-size:13px;color:var(--text-muted)">32 agents. Click any card for prompt history, performance, and blind spots.</p>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
-          <button class="btn-primary" onclick="SAGE.runBlindSpotDetection('all')">🔍 Blind Spot Scan</button>
-          <button class="btn-primary" style="background:var(--accent-purple)" onclick="SAGE.runFixWeakestAgent('all')">🛠️ Fix Weakest Agent</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-primary" onclick="SAGE.runAutoresearch('trading')">🔬 Trading Autoresearch</button>
+          <button class="btn-primary" style="background:var(--accent-purple)" onclick="SAGE.runAutoresearch('sports')">🔬 Sports Autoresearch</button>
         </div>
       </div>
       <div id="agents-container"></div>
