@@ -46,6 +46,31 @@ const PROVIDERS = {
 // Priority order
 const PROVIDER_ORDER = ['ollama', 'gemini', 'groq', 'openrouter'];
 
+const PROVIDER_COOLDOWN_MS = 60_000;
+const providerCooldowns = new Map();
+
+function isRateLimitError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests');
+}
+
+function setProviderCooldown(providerId, ms = PROVIDER_COOLDOWN_MS) {
+  if (!providerId) return;
+  providerCooldowns.set(providerId, Date.now() + ms);
+}
+
+function getProviderCooldownRemaining(providerId) {
+  const until = Number(providerCooldowns.get(providerId) || 0);
+  return Math.max(0, until - Date.now());
+}
+
+function clearExpiredCooldowns() {
+  const now = Date.now();
+  for (const [provider, until] of [...providerCooldowns.entries()]) {
+    if (!until || Number(until) <= now) providerCooldowns.delete(provider);
+  }
+}
+
 // ─────────────────────────────────────────
 // CHECK AVAILABILITY
 // ─────────────────────────────────────────
@@ -60,11 +85,12 @@ async function isOllamaAvailable() {
 
 async function checkProviderStatus() {
   const ollamaUp = await isOllamaAvailable();
+  clearExpiredCooldowns();
   return {
     ollama: { available: ollamaUp, reason: ollamaUp ? 'Running locally' : 'Not reachable (is Ollama running?)' },
-    gemini: { available: !!process.env.GEMINI_API_KEY, reason: process.env.GEMINI_API_KEY ? 'API key set' : 'GEMINI_API_KEY not set in .env' },
-    groq:   { available: !!process.env.GROQ_API_KEY,   reason: process.env.GROQ_API_KEY   ? 'API key set' : 'GROQ_API_KEY not set in .env' },
-    openrouter: { available: !!process.env.OPENROUTER_API_KEY, reason: process.env.OPENROUTER_API_KEY ? 'API key set' : 'OPENROUTER_API_KEY not set in .env' },
+    gemini: { available: !!process.env.GEMINI_API_KEY, reason: providerCooldowns.has('gemini') ? `Cooling down (${Math.ceil(getProviderCooldownRemaining('gemini') / 1000)}s left)` : (process.env.GEMINI_API_KEY ? 'API key set' : 'GEMINI_API_KEY not set in .env') },
+    groq:   { available: !!process.env.GROQ_API_KEY,   reason: providerCooldowns.has('groq') ? `Cooling down (${Math.ceil(getProviderCooldownRemaining('groq') / 1000)}s left)` : (process.env.GROQ_API_KEY   ? 'API key set' : 'GROQ_API_KEY not set in .env') },
+    openrouter: { available: !!process.env.OPENROUTER_API_KEY, reason: providerCooldowns.has('openrouter') ? `Cooling down (${Math.ceil(getProviderCooldownRemaining('openrouter') / 1000)}s left)` : (process.env.OPENROUTER_API_KEY ? 'API key set' : 'OPENROUTER_API_KEY not set in .env') },
   };
 }
 
@@ -121,7 +147,8 @@ async function callOpenAICompat(providerId, messages, system, maxTokens) {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`${providerId} HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    const errMsg = `${providerId} HTTP ${res.status}: ${errText.slice(0, 200)}`;
+    throw new Error(errMsg);
   }
 
   const data = await res.json();
@@ -134,6 +161,7 @@ async function callOpenAICompat(providerId, messages, system, maxTokens) {
 // MAIN CASCADE FUNCTION
 // ─────────────────────────────────────────
 async function chat({ messages, system, maxTokens = 2000, forceProvider = null }) {
+  clearExpiredCooldowns();
   const errors = [];
 
   // If a specific provider is forced, try it first, then continue through the rest
@@ -142,6 +170,11 @@ async function chat({ messages, system, maxTokens = 2000, forceProvider = null }
     : PROVIDER_ORDER;
 
   for (const providerId of order) {
+    const cooldownRemaining = getProviderCooldownRemaining(providerId);
+    if (cooldownRemaining > 0) {
+      errors.push({ provider: providerId, error: `Cooling down (${Math.ceil(cooldownRemaining / 1000)}s left)` });
+      continue;
+    }
     try {
       if (providerId === 'ollama') {
         // Quick availability check before trying
@@ -156,6 +189,7 @@ async function chat({ messages, system, maxTokens = 2000, forceProvider = null }
         return result;
       }
     } catch (err) {
+      if (isRateLimitError(err)) setProviderCooldown(providerId);
       console.warn(`[LLM] ⚠️  ${PROVIDERS[providerId].name} failed: ${err.message}`);
       errors.push({ provider: providerId, error: err.message });
     }
