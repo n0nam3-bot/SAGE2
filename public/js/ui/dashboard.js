@@ -735,7 +735,9 @@ Avalanche ML: -130  |  Stars ML: +110</pre>
 
     const sheetsOk = state.sheetsStatus?.authorized
       || !!Profile?.getSheetsToken?.()
-      || !!globalThis.SheetsClient?.getAppsScriptUrl?.();
+      || !!globalThis.SheetsClient?.getAppsScriptUrl?.()
+      || !!localStorage.getItem('sage_apps_script_url')
+      || !!localStorage.getItem(`sage_profile_${(Auth.getSession?.()?.username || Auth.getLastUser?.() || 'global').toLowerCase()}_apps_script_url`);
 
     const hyperOn = LLM.isHyperMode?.();
     const hyperBtn = document.getElementById('hyper-toggle-btn');
