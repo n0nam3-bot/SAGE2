@@ -146,6 +146,10 @@ Provide your analysis in the specified JSON format. Be specific with tickers, en
   function buildSportsContext(agent, ctx) {
     const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     const todayISO = new Date().toISOString().slice(0, 10);
+    const sportsPreferences = normalizeSportsPreferences(ctx.sportsPreferences || {});
+    const selectedSports = sportsPreferences.allowedSports || [];
+    const selectedSportsLabel = selectedSports.length ? selectedSports.join(', ') : 'All sports';
+    const selectedMarketsLabel = (sportsPreferences.allowedMarkets || []).join(', ') || 'All markets';
 
     // If this is a sport specialist, filter the games to only their sport
     const agentSport = agent.sport; // e.g. "NFL", "NBA", "MLB", "NHL", "MMA" — set in definitions
@@ -162,6 +166,9 @@ Provide your analysis in the specified JSON format. Be specific with tickers, en
     }
 
     return `Today's date: ${today} (${todayISO})
+User-selected sports in scope: ${selectedSportsLabel}
+Allowed bet types: ${selectedMarketsLabel}
+Target pick count: ${sportsPreferences.pickCount}
 Today's games/events for YOUR SPORT (${agentSport || 'all sports'}):
 ${gamesSection}
 
@@ -171,9 +178,10 @@ ${ctx.lineMovements ? `\nLine movements: ${ctx.lineMovements}` : ''}
 
 CRITICAL REMINDERS:
 1. ONLY analyze ${agentSport || 'the sports'} games listed above.
-2. ONLY recommend bets with American odds -200 or higher.
-3. ALWAYS include event_date (YYYY-MM-DD) and game_time for every pick.
-4. If no ${agentSport || ''} games are listed above, output an empty JSON array [].
+2. ONLY analyze the user-selected sports listed above.
+3. ONLY recommend bets with American odds -200 or higher.
+4. ALWAYS include event_date (YYYY-MM-DD) and game_time for every pick.
+5. If no ${agentSport || ''} games are listed above, output an empty JSON array [].
 ${agent.weight !== 1.0 ? `\nYour current Darwinian trust weight: ${agent.weight.toFixed(2)} / 2.5` : ''}
 
 Provide your picks in the specified JSON format.`;
@@ -327,7 +335,7 @@ Provide your picks in the specified JSON format.`;
 
     // ── Layer 1: Sport Specialists — each gets only their sport's games ──
     onProgress?.({ stage: 'layer1', message: 'Running sport specialist analysis (NFL, NBA, MLB, NHL, MMA)...' });
-    const specialists = sportsAgents.filter(a => a.layer === 1);
+    const specialists = sportsAgents.filter(a => a.layer === 1 && (!a.sport || sportsPreferences.allowedSports.includes(a.sport)));
     // Each specialist gets the full context; buildSportsContext will filter by agent.sport
     const specialistResults = await runLayerParallel(
       specialists,
@@ -335,7 +343,7 @@ Provide your picks in the specified JSON format.`;
       'sports'
     );
     results.layers.specialists = specialistResults;
-    const rawPicks = extractSportsPicks(specialistResults);
+    const rawPicks = extractSportsPicks(specialistResults, sportsPreferences);
     onProgress?.({ stage: 'layer1_done', message: `Specialists: ${rawPicks.length} raw picks (sport-filtered)`, data: specialistResults });
 
     // ── Layer 2: Support Analysts (full context — they work across all sports) ──
@@ -376,7 +384,7 @@ Provide your picks in the specified JSON format.`;
     // Extract final picks with fallback
     const cioResult = decisionResults.find(r => r.agentId === 's_cio');
     const cioPicks = normalizeSportsFinalPicks(cioResult?.parsed?.final_picks || []).filter(p => isSportsPickAllowedByPreferences(p, sportsPreferences));
-    const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults]);
+    const allCandidates = collectSportsCandidates([...specialistResults, ...supportResults, ...decisionResults], sportsPreferences);
     const fallbackTarget = Math.max(sportsPreferences.pickCount, 3);
     const fallbackPicks = buildSportsFallbackPicks(allCandidates, fallbackTarget, Math.min(3, fallbackTarget), sportsPreferences);
     const mergedPicks = normalizeSportsFinalPicks([...cioPicks, ...fallbackPicks]);
@@ -552,13 +560,15 @@ Provide your picks in the specified JSON format.`;
     return ideas;
   }
 
-  function extractSportsPicks(specialistResults) {
-    return collectSportsCandidates(specialistResults).filter(p => isAllowedSportsOdds(p.odds));
+  function extractSportsPicks(specialistResults, preferences = {}) {
+    const prefs = normalizeSportsPreferences(preferences);
+    return collectSportsCandidates(specialistResults, prefs).filter(p => isAllowedSportsOdds(p.odds) && isSportsPickAllowedByPreferences(p, prefs));
   }
 
-  function collectSportsCandidates(resultList) {
+  function collectSportsCandidates(resultList, preferences = {}) {
     const picks = [];
     const seenNodes = new WeakSet();
+    const prefs = normalizeSportsPreferences(preferences);
     for (const r of Array.isArray(resultList) ? resultList : []) {
       const providers = Array.isArray(r.providerOutputs) && r.providerOutputs.length
         ? r.providerOutputs.map(p => p.provider).filter(Boolean)
@@ -569,7 +579,7 @@ Provide your picks in the specified JSON format.`;
         walkSportsCandidateTree(r.raw, meta, picks, seenNodes);
       }
     }
-    return picks;
+    return picks.filter(p => isSportsPickAllowedByPreferences(p, prefs));
   }
 
   function walkSportsCandidateTree(node, meta, out, seenNodes) {
