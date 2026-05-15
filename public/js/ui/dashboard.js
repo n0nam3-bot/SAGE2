@@ -26,6 +26,31 @@ const UI = (() => {
     if (window._sageState) window._sageState.activeTab = tab;
   }
 
+  function collectCurrentSessionAgentStats() {
+    const stats = {};
+    const sessions = [window._sageState?.lastSportsSession, window._sageState?.lastTradingSession].filter(Boolean);
+    for (const session of sessions) {
+      for (const pick of Array.isArray(session.finalPicks) ? session.finalPicks : []) {
+        const ids = new Set([
+          pick.agentId,
+          pick.decision_agent_id,
+          pick.review_agent_id,
+          pick.primary_agent_source,
+          pick.source_agent,
+          ...(Array.isArray(pick.credited_agents) ? pick.credited_agents : []),
+          ...(Array.isArray(pick.agreement_agent_ids) ? pick.agreement_agent_ids : []),
+          ...(Array.isArray(pick.agents_in_agreement) ? pick.agents_in_agreement : []),
+        ].map(v => String(v || '').trim()).filter(Boolean));
+        for (const id of ids) {
+          if (!/^[st]_[a-z0-9_]+$/i.test(id)) continue;
+          if (!stats[id]) stats[id] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
+          stats[id].predictions++;
+        }
+      }
+    }
+    return stats;
+  }
+
   // ════════════════════════════════════════
   // AGENT CARDS
   // ════════════════════════════════════════
@@ -48,6 +73,16 @@ const UI = (() => {
         else { liveStats[aid].losses++; }
         liveStats[aid].totalReturn += (pick.returnPct || 0);
       }
+    }
+
+    const sessionStats = collectCurrentSessionAgentStats();
+    for (const [aid, sess] of Object.entries(sessionStats)) {
+      if (!liveStats[aid]) liveStats[aid] = { predictions: 0, correct: 0, totalReturn: 0, wins: 0, losses: 0 };
+      liveStats[aid].predictions = Math.max(liveStats[aid].predictions || 0, sess.predictions || 0);
+      liveStats[aid].correct = Math.max(liveStats[aid].correct || 0, sess.correct || 0);
+      liveStats[aid].wins = Math.max(liveStats[aid].wins || 0, sess.wins || 0);
+      liveStats[aid].losses = Math.max(liveStats[aid].losses || 0, sess.losses || 0);
+      liveStats[aid].totalReturn = Math.max(liveStats[aid].totalReturn || 0, sess.totalReturn || 0);
     }
 
     agents.forEach(a => {
