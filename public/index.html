@@ -242,49 +242,6 @@ Leave blank — SAGE fetches everything itself." style="min-height:90px"></texta
           </div>
 
           <div class="control-card">
-            <h3>🏟️ Sports to Analyze</h3>
-            <div class="form-group">
-              <label>Select one or more sports</label>
-              <div class="sports-market-grid">
-                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NFL" checked onchange="SAGE.saveSportsPreferences()"> NFL</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NBA" checked onchange="SAGE.saveSportsPreferences()"> NBA</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-code="MLB" checked onchange="SAGE.saveSportsPreferences()"> MLB</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-code="NHL" checked onchange="SAGE.saveSportsPreferences()"> NHL</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-code="MMA" checked onchange="SAGE.saveSportsPreferences()"> MMA / UFC</label>
-              </div>
-            </div>
-          </div>
-
-          <div class="control-card">
-            <h3>🎚️ Pick Preferences</h3>
-            <div class="form-group">
-              <label for="sports-risk-profile">Risk / odds profile</label>
-              <select id="sports-risk-profile" onchange="SAGE.saveSportsPreferences()">
-                <option value="balanced">Balanced — standard -200+ filter</option>
-                <option value="conservative">Conservative — lower risk, higher confidence</option>
-                <option value="positive_only">Positive odds only</option>
-                <option value="lotto">Lotto — higher-upside longshots</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label for="sports-pick-count">Number of picks</label>
-              <input type="number" id="sports-pick-count" min="1" max="20" step="1" value="5" onchange="SAGE.saveSportsPreferences()">
-            </div>
-            <div class="form-group">
-              <label>Allowed bet types</label>
-              <div class="sports-market-grid" id="sports-market-grid">
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="moneyline" checked onchange="SAGE.saveSportsPreferences()"> Moneyline</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="spread" checked onchange="SAGE.saveSportsPreferences()"> Spread / run line / puck line</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="total" checked onchange="SAGE.saveSportsPreferences()"> Totals</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="player_prop" checked onchange="SAGE.saveSportsPreferences()"> Player props</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="game_prop" checked onchange="SAGE.saveSportsPreferences()"> Game props</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="team_prop" checked onchange="SAGE.saveSportsPreferences()"> Team props</label>
-                <label class="sports-market-pill"><input type="checkbox" data-sports-market="special" checked onchange="SAGE.saveSportsPreferences()"> Special / other props</label>
-              </div>
-            </div>
-          </div>
-
-          <div class="control-card">
             <h3>📝 Additional Notes <span style="font-weight:400;color:var(--text-muted)">(optional)</span></h3>
             <textarea class="context-textarea" id="sports-context"
               placeholder="Anything SAGE can't find automatically...
