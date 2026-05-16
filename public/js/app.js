@@ -31,6 +31,103 @@ const SAGE = (() => {
     window._sageState = state;
   }
 
+  const SPORTS_PREF_STORAGE_KEY = 'sage_sports_preferences';
+  const SPORTS_AVAILABLE_CODES = ['NFL', 'NBA', 'MLB', 'NHL', 'MMA'];
+  const SPORTS_DEFAULT_PREFERENCES = {
+    oddsProfile: 'balanced',
+    pickCount: 5,
+    allowedMarkets: ['moneyline', 'spread', 'total', 'player_prop', 'game_prop', 'team_prop', 'special'],
+    allowedSports: [...SPORTS_AVAILABLE_CODES],
+  };
+
+  function clampInt(value, min, max, fallback) {
+    const n = Number.parseInt(value, 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function normalizeSportCode(value) {
+    const raw = String(value ?? '').trim().toUpperCase();
+    if (!raw) return '';
+    if (raw === 'UFC' || raw === 'MMA/UFC' || raw.includes('MIXED MARTIAL')) return 'MMA';
+    if (SPORTS_AVAILABLE_CODES.includes(raw)) return raw;
+    if (/football/.test(raw)) return 'NFL';
+    if (/basketball/.test(raw)) return 'NBA';
+    if (/baseball/.test(raw)) return 'MLB';
+    if (/hockey/.test(raw)) return 'NHL';
+    if (/mma|ufc/.test(raw)) return 'MMA';
+    return raw;
+  }
+
+  function normalizeSportsPreferences(input = {}) {
+    const allowedMarkets = Array.isArray(input.allowedMarkets) && input.allowedMarkets.length
+      ? [...new Set(input.allowedMarkets.map(v => String(v).trim()).filter(Boolean))]
+      : [...SPORTS_DEFAULT_PREFERENCES.allowedMarkets];
+    const allowedSports = Array.isArray(input.allowedSports) && input.allowedSports.length
+      ? [...new Set(input.allowedSports.map(normalizeSportCode).filter(code => SPORTS_AVAILABLE_CODES.includes(code)))]
+      : [...SPORTS_DEFAULT_PREFERENCES.allowedSports];
+    return {
+      oddsProfile: ['balanced', 'conservative', 'positive_only', 'lotto'].includes(input.oddsProfile)
+        ? input.oddsProfile
+        : SPORTS_DEFAULT_PREFERENCES.oddsProfile,
+      pickCount: clampInt(input.pickCount, 1, 20, SPORTS_DEFAULT_PREFERENCES.pickCount),
+      allowedMarkets,
+      allowedSports,
+    };
+  }
+
+  function readSportsPreferencesFromUI() {
+    const allowedMarkets = [...document.querySelectorAll('[data-sports-market]')]
+      .filter(el => el.checked)
+      .map(el => el.getAttribute('data-sports-market'));
+    const allowedSports = [...document.querySelectorAll('[data-sports-code]')]
+      .filter(el => el.checked)
+      .map(el => el.getAttribute('data-sports-code'));
+    return normalizeSportsPreferences({
+      oddsProfile: document.getElementById('sports-risk-profile')?.value,
+      pickCount: document.getElementById('sports-pick-count')?.value,
+      allowedMarkets,
+      allowedSports,
+    });
+  }
+
+  function persistSportsPreferences(prefs) {
+    try {
+      localStorage.setItem(SPORTS_PREF_STORAGE_KEY, JSON.stringify(normalizeSportsPreferences(prefs)));
+    } catch {}
+  }
+
+  function loadSportsPreferences() {
+    let prefs = SPORTS_DEFAULT_PREFERENCES;
+    try {
+      const raw = localStorage.getItem(SPORTS_PREF_STORAGE_KEY);
+      if (raw) prefs = normalizeSportsPreferences(JSON.parse(raw));
+    } catch {}
+    const profile = document.getElementById('sports-risk-profile');
+    if (profile) profile.value = prefs.oddsProfile;
+    const count = document.getElementById('sports-pick-count');
+    if (count) count.value = String(prefs.pickCount);
+    const allowed = new Set(prefs.allowedMarkets);
+    document.querySelectorAll('[data-sports-market]').forEach(el => {
+      el.checked = allowed.has(el.getAttribute('data-sports-market'));
+    });
+    const allowedSports = new Set((prefs.allowedSports || SPORTS_DEFAULT_PREFERENCES.allowedSports).map(normalizeSportCode));
+    document.querySelectorAll('[data-sports-code]').forEach(el => {
+      el.checked = allowedSports.has(normalizeSportCode(el.getAttribute('data-sports-code')));
+    });
+    return prefs;
+  }
+
+  function saveSportsPreferences() {
+    const prefs = readSportsPreferencesFromUI();
+    persistSportsPreferences(prefs);
+    return prefs;
+  }
+
+  function getSportsPreferences() {
+    return readSportsPreferencesFromUI();
+  }
+
   // ── Boot (called after successful login) ──
   async function init() {
     console.log('🧠 SAGE initializing...');
@@ -84,6 +181,7 @@ const SAGE = (() => {
     _setLoadMsg('Building dashboard…');
     UI.renderAll();
     UI.updateStatus(state);
+    loadSportsPreferences();
     // refresh sheets status asynchronously in case auth/url state just changed
     try { await SAGE.updateSheetsStatus?.(); } catch {}
 
@@ -193,7 +291,12 @@ const SAGE = (() => {
       UI.updateProgress({ stage: 'fetch', message: '🔍 Fetching schedules, odds, and injury reports...' });
       const keys = Auth.getKeys();
       const sportsDate = document.getElementById('sports-date-filter')?.value || new Date().toISOString().slice(0,10);
-      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, { date: sportsDate, activeScreen: isForeground() });
+      const sportsPreferences = getSportsPreferences();
+      const feedResult = await DataFeeds.buildSportsContext(keys, userNotes, {
+        date: sportsDate,
+        activeScreen: isForeground(),
+        sportsPreferences,
+      });
 
       if (!feedResult.hasOdds) {
         UI.showToast('⚠️ No Odds API key — add one free in Profile for real moneylines', 'warning');
@@ -207,10 +310,14 @@ const SAGE = (() => {
 
       // Step 2: Run the debate
       const result = await DebateEngine.runSportsDebate(
-        { gamesContext: feedResult.context, scheduleData: feedResult.scheduleData || {} },
+        {
+          gamesContext: feedResult.context,
+          scheduleData: feedResult.scheduleData || {},
+          sportsPreferences,
+        },
         (progress) => UI.updateProgress(progress)
       );
-      state.lastSportsSession = result;
+      state.lastSportsSession = { ...result, sportsPreferences };
 
       await DB.saveSession({ ...result, domain: 'sports' });
       for (const pick of result.finalPicks || []) {
@@ -486,6 +593,9 @@ Spawn a new specialist agent?`);
     runBacktest,
     updateSportsDateMode,
     setActiveTab,
+    saveSportsPreferences,
+    loadSportsPreferences,
+    getSportsPreferences,
     isForeground,
     getState: () => state,
     updateSheetsStatus: async () => {
