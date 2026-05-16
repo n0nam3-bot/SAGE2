@@ -317,65 +317,19 @@ const DataFeeds = (() => {
     const dateLabel = buildSportsDateLabel(pickedDate, dateMode);
     const range = buildDateRange(pickedDate, dateMode);
     const tz = userTimeZone();
-    const prefs = options.sportsPreferences || {};
-    const availableSports = {
-      NFL: { label: 'NFL', espn: ['football', 'nfl'], odds: 'americanfootball_nfl', reddit: 'nfl', schedule: true, news: true },
-      NBA: { label: 'NBA', espn: ['basketball', 'nba'], odds: 'basketball_nba', reddit: 'nba', schedule: true, news: true },
-      MLB: { label: 'MLB', espn: ['baseball', 'mlb'], odds: 'baseball_mlb', reddit: 'baseball', schedule: true, news: true },
-      NHL: { label: 'NHL', espn: ['hockey', 'nhl'], odds: 'icehockey_nhl', reddit: 'hockey', schedule: true, news: true },
-      MMA: { label: 'MMA/UFC', espn: null, odds: 'mma_mixed_martial_arts', reddit: 'MMA', schedule: false, news: false },
-    };
-    const normalizeSportCode = value => {
-      const raw = String(value ?? '').trim().toUpperCase();
-      if (!raw) return '';
-      if (raw === 'UFC' || raw === 'MMA/UFC' || raw.includes('MIXED MARTIAL')) return 'MMA';
-      if (availableSports[raw]) return raw;
-      if (/football/.test(raw)) return 'NFL';
-      if (/basketball/.test(raw)) return 'NBA';
-      if (/baseball/.test(raw)) return 'MLB';
-      if (/hockey/.test(raw)) return 'NHL';
-      if (/mma|ufc/.test(raw)) return 'MMA';
-      return raw;
-    };
-    const selectedSports = (() => {
-      const raw = Array.isArray(prefs.allowedSports) && prefs.allowedSports.length
-        ? prefs.allowedSports
-        : Object.keys(availableSports);
-      const normalized = [...new Set(raw.map(normalizeSportCode).filter(code => availableSports[code]))];
-      return normalized.length ? normalized : Object.keys(availableSports);
-    })();
-    const selectedSportLabels = selectedSports.map(code => availableSports[code]?.label || code).join(', ');
-    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}
-User timezone: ${tz}
-Selected date: ${dateLabel}
-`];
-    if (prefs && Object.keys(prefs).length) {
-      const marketLabelMap = {
-        moneyline: 'Moneyline',
-        spread: 'Spread / run line / puck line',
-        total: 'Totals',
-        player_prop: 'Player props',
-        game_prop: 'Game props',
-        team_prop: 'Team props',
-        special: 'Special / other props',
-      };
-      const selectedMarkets = Array.isArray(prefs.allowedMarkets) && prefs.allowedMarkets.length
-        ? prefs.allowedMarkets.map(m => marketLabelMap[m] || m).join(', ')
-        : 'All available';
-      const profileLabel = {
-        balanced: 'Balanced',
-        conservative: 'Conservative',
-        positive_only: 'Positive odds only',
-        lotto: 'Lotto / high-upside',
-      }[prefs.oddsProfile] || 'Balanced';
-      lines.push(`=== USER-SELECTED PREFERENCES ===`);
-      lines.push(`Risk profile: ${profileLabel}`);
-      lines.push(`Target pick count: ${Math.max(1, Math.min(20, Number(prefs.pickCount) || 5))}`);
-      lines.push(`Allowed bet types: ${selectedMarkets}`);
-      lines.push(`Selected sports: ${selectedSportLabels || 'All available'}`);
-    }
+    const lines = [`Auto-fetched sports data — ${new Date().toLocaleString()}\nUser timezone: ${tz}\nSelected date: ${dateLabel}\n`];
     const fetched = [];
     const oddsKey = keys.odds_api_key;
+
+    // ── ESPN schedules — selected date only ──
+    const dateList = getSportsDateList(pickedDate, dateMode);
+    const daySnapshots = await Promise.all(dateList.map(async day => ({
+      day,
+      nfl: await getESPNGames('football', 'nfl', day),
+      nba: await getESPNGames('basketball', 'nba', day),
+      mlb: await getESPNGames('baseball', 'mlb', day),
+      nhl: await getESPNGames('hockey', 'nhl', day),
+    })));
 
     const uniqueBy = (items, keyFn) => {
       const seen = new Set();
@@ -387,6 +341,18 @@ Selected date: ${dateLabel}
       });
     };
 
+    const nflGames = uniqueBy(daySnapshots.flatMap(d => d.nfl), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
+    const nbaGames = uniqueBy(daySnapshots.flatMap(d => d.nba), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
+    const mlbGames = uniqueBy(daySnapshots.flatMap(d => d.mlb), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
+    const nhlGames = uniqueBy(daySnapshots.flatMap(d => d.nhl), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
+
+    const scheduleMap = [
+      { games: nflGames, name: 'NFL' },
+      { games: nbaGames, name: 'NBA' },
+      { games: mlbGames, name: 'MLB' },
+      { games: nhlGames, name: 'NHL' },
+    ];
+
     const upcomingOnly = games => (Array.isArray(games) ? games : []).filter(g => {
       const startMs = g.startTime ? Date.parse(g.startTime) : NaN;
       const hasValidTime = !!g.hasScheduledTime && !!g.time && !/tbd|tba|postponed|delayed|live|in progress|final/i.test(String(g.time));
@@ -394,41 +360,41 @@ Selected date: ${dateLabel}
       return preGame && !!g.awayTeam && !!g.homeTeam && hasValidTime && Number.isFinite(startMs) && startMs > Date.now();
     });
 
-    const scheduleData = {};
+    const scheduleData = {
+      NFL: upcomingOnly(nflGames),
+      NBA: upcomingOnly(nbaGames),
+      MLB: upcomingOnly(mlbGames),
+      NHL: upcomingOnly(nhlGames),
+    };
 
-    // ── ESPN schedules — only the sports the user selected ──
-    for (const sportCode of selectedSports) {
-      const cfg = availableSports[sportCode];
-      if (!cfg?.schedule || !Array.isArray(cfg.espn)) {
-        scheduleData[sportCode] = [];
-        continue;
-      }
-      const [espnSport, espnLeague] = cfg.espn;
-      const gamesByDate = await Promise.all(getSportsDateList(pickedDate, dateMode).map(async day => getESPNGames(espnSport, espnLeague, day)));
-      const allGames = uniqueBy(gamesByDate.flat(), g => `${g.shortName || g.name || ''}|${g.awayTeam}|${g.homeTeam}|${g.time}`);
-      const upcomingGames = upcomingOnly(allGames);
-      scheduleData[sportCode] = upcomingGames;
+    let hasSchedule = false;
+    for (const { games, name } of scheduleMap) {
+      const upcomingGames = upcomingOnly(games);
       if (!upcomingGames.length) continue;
-      lines.push(`
-=== ${cfg.label} SCHEDULE (${dateLabel}) ===`);
+      hasSchedule = true;
+      lines.push(`\n=== ${name} SCHEDULE (${dateLabel}) ===`);
       upcomingGames.forEach(g => {
         const record = g.awayRecord && g.homeRecord ? ` (${g.awayRecord} vs ${g.homeRecord})` : '';
         const when = g.time || 'TBD';
         lines.push(`${g.awayTeam} @ ${g.homeTeam}${record} — ${when}`);
       });
-      fetched.push(`${cfg.label} schedule`);
+      fetched.push(`${name} schedule`);
     }
 
     // ── Real odds from The Odds API ──
     if (oddsKey) {
-      for (const sportCode of selectedSports) {
-        const cfg = availableSports[sportCode];
-        if (!cfg?.odds) continue;
-        const oddsResult = await getLiveOdds(cfg.odds, oddsKey, range, { useCacheOnly: !options.activeScreen, persistFreshOdds: !!options.activeScreen, sportName: cfg.label });
+      const oddsSports = [
+        { key: 'americanfootball_nfl', name: 'NFL' },
+        { key: 'basketball_nba', name: 'NBA' },
+        { key: 'baseball_mlb', name: 'MLB' },
+        { key: 'icehockey_nhl', name: 'NHL' },
+        { key: 'mma_mixed_martial_arts', name: 'MMA/UFC' },
+      ];
+      for (const { key, name } of oddsSports) {
+        const oddsResult = await getLiveOdds(key, oddsKey, range, { useCacheOnly: !options.activeScreen, persistFreshOdds: !!options.activeScreen, sportName: name });
         const odds = oddsResult?.rows || [];
         if (!odds.length) continue;
-        lines.push(`
-=== ${cfg.label} LIVE ODDS (${dateLabel}) ===`);
+        lines.push(`\n=== ${name} LIVE ODDS (${dateLabel}) ===`);
         odds.slice(0, 8).forEach(g => {
           const time = g.commenceTime ? new Date(g.commenceTime).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: userTimeZone(), timeZoneName: 'short' }) : '';
           const ml = `${g.away} (${g.awayML ?? '—'}) @ ${g.home} (${g.homeML ?? '—'})`;
@@ -436,47 +402,55 @@ Selected date: ${dateLabel}
           const total = g.total != null ? ` | O/U: ${g.total}` : '';
           lines.push(`${ml}${spread}${total}${time ? ' — ' + time : ''} [${g.book}]`);
         });
-        fetched.push(`${cfg.label} odds${oddsResult?.fromCache ? ' (cache)' : ''}`);
+        fetched.push(`${name} odds${oddsResult?.fromCache ? ' (cache)' : ''}`);
       }
     } else {
-      lines.push(`
-=== ODDS NOTE ===
-No Odds API key set — add a free key from the-odds-api.com in Profile to get real moneylines, spreads, and totals. The system will still analyze matchups using schedules above.`);
+      lines.push(`\n=== ODDS NOTE ===\nNo Odds API key set — add a free key from the-odds-api.com in Profile to get real moneylines, spreads, and totals. The system will still analyze matchups using schedules above.`);
     }
 
     // ── ESPN team news & injuries ──
-    const newsFetches = selectedSports.filter(code => availableSports[code]?.news).map(async code => {
-      const cfg = availableSports[code];
-      const [espnSport, espnLeague] = cfg.espn || [];
-      if (!espnSport || !espnLeague) return { code, news: [], label: cfg.label };
-      const news = await getESPNNews(espnSport, espnLeague);
-      return { code, news, label: cfg.label };
-    });
-    const newsResults = await Promise.all(newsFetches);
-    for (const { news, label } of newsResults) {
+    const [nflNews, nbaNews, mlbNews, nhlNews] = await Promise.all([
+      getESPNNews('football', 'nfl'),
+      getESPNNews('basketball', 'nba'),
+      getESPNNews('baseball', 'mlb'),
+      getESPNNews('hockey', 'nhl'),
+    ]);
+
+    const newsMap = [
+      { news: nflNews, name: 'NFL' },
+      { news: nbaNews, name: 'NBA' },
+      { news: mlbNews, name: 'MLB' },
+      { news: nhlNews, name: 'NHL' },
+    ];
+
+    for (const { news, name } of newsMap) {
       if (!news.length) continue;
-      const injuryNews = news.filter(n => /injur|out|questionable|scratch|ruled|doubt|miss|return/i.test(n.headline));
+      const injuryNews = news.filter(n =>
+        /injur|out|questionable|scratch|ruled|doubt|miss|return/i.test(n.headline)
+      );
       if (injuryNews.length) {
-        lines.push(`
-=== ${label} INJURY / ROSTER NEWS ===`);
+        lines.push(`\n=== ${name} INJURY / ROSTER NEWS ===`);
         injuryNews.slice(0, 5).forEach(n => lines.push(`• ${n.headline}${n.description ? ' — ' + n.description : ''}`));
-        fetched.push(`${label} injury news`);
+        fetched.push(`${name} injury news`);
       }
     }
 
     // ── Reddit injury & analysis threads ──
-    const sportsReddits = selectedSports
-      .map(code => ({ sub: availableSports[code]?.reddit, sport: availableSports[code]?.label || code }))
-      .filter(item => item.sub);
+    const sportsReddits = [
+      { sub: 'nfl', sport: 'NFL' },
+      { sub: 'nba', sport: 'NBA' },
+      { sub: 'baseball', sport: 'MLB' },
+      { sub: 'hockey', sport: 'NHL' },
+      { sub: 'MMA', sport: 'MMA' },
+    ];
 
-    for (const { sub } of sportsReddits) {
+    for (const { sub, sport } of sportsReddits) {
       const posts = await getRedditPosts(sub, 10);
       const relevant = posts.filter(p =>
         /injur|out|questionable|scratch|ruled|doubt|starter|lineup|preview|matchup|odds/i.test(p.title + p.flair)
       );
       if (relevant.length) {
-        lines.push(`
-=== r/${sub} — Injury & Game News ===`);
+        lines.push(`\n=== r/${sub} — Injury & Game News ===`);
         relevant.slice(0, 5).forEach(p => lines.push(`[${p.score}↑] ${p.title}`));
         fetched.push(`r/${sub}`);
       }
@@ -484,9 +458,7 @@ No Odds API key set — add a free key from the-odds-api.com in Profile to get r
 
     // ── User's additional notes ──
     if (userNotes?.trim()) {
-      lines.push(`
-=== ADDITIONAL NOTES FROM USER ===
-${userNotes.trim()}`);
+      lines.push(`\n=== ADDITIONAL NOTES FROM USER ===\n${userNotes.trim()}`);
     }
 
     return {
@@ -501,7 +473,6 @@ ${userNotes.trim()}`);
       timestamp: new Date().toISOString(),
     };
   }
-
 
   return {
     buildTradingContext,
